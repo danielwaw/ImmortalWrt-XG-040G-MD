@@ -1,4 +1,4 @@
-name: Build Custom AdGuardHome & Tailscale IPK
+name: Build Custom AdGuardHome IPK
 
 on:
   workflow_dispatch:
@@ -25,42 +25,34 @@ jobs:
           tar --zstd -xf sdk.tar.zst -C sdk --strip-components=1
           rm -f sdk.tar.zst
 
-      - name: Setup feeds and enable packages in .config
+      - name: Setup feeds and configure
         run: |
           cd sdk
           
-          # 1. 注入 kenzok8 软件源 (提供 luci-app-adguardhome 和 luci-app-tailscale)
+          # 1. 以正规软件源 (feeds) 方式注入 kenzok8 仓库
           echo "src-git kenzok8 https://github.com/kenzok8/openwrt-packages.git" >> feeds.conf.default
-          
-          # 2. 更新并安装插件 feeds 索引
           ./scripts/feeds update -a
+          
+          # 2. 安装 luci-app-adguardhome 及其依赖
           ./scripts/feeds install luci-app-adguardhome
-          ./scripts/feeds install luci-app-tailscale
           
-          # 3. 核心修复：必须将目标插件写入 .config 并设置为模块 (=m)，Make 才会生成 compile 构建目标！
+          # 3. 关键修复：写入 .config 触发编译规则生成
           echo "CONFIG_PACKAGE_luci-app-adguardhome=m" >> .config
-          echo "CONFIG_PACKAGE_luci-app-tailscale=m" >> .config
           
-          # 4. 生成配置并自动补充关联依赖
+          # 4. 生成编译配置
           make defconfig
 
-      - name: Compile Tailscale IPK
+      - name: Compile luci-app-adguardhome
         run: |
           cd sdk
-          make package/luci-app-tailscale/compile V=s -j$(nproc) || make package/luci-app-tailscale/compile V=s -j1
-
-      - name: Compile AdGuardHome IPK
-        run: |
-          cd sdk
+          # 优先多线程编译，失败则回退单线程打印错误
           make package/luci-app-adguardhome/compile V=s -j$(nproc) || make package/luci-app-adguardhome/compile V=s -j1
 
       - name: Collect and Upload IPK Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: custom-openwrt-ipks-24.10
+          name: luci-app-adguardhome-ipk
           path: |
-            sdk/bin/packages/**/luci-app-tailscale*.ipk
-            sdk/bin/packages/**/tailscale*.ipk
             sdk/bin/packages/**/luci-app-adguardhome*.ipk
             sdk/bin/packages/**/adguardhome*.ipk
-            sdk/bin/packages/**/luci-i18n-*-zh-cn*.ipk
+            sdk/bin/packages/**/luci-i18n-adguardhome*.ipk
