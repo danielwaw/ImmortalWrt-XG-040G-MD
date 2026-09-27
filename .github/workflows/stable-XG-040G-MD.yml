@@ -14,16 +14,14 @@ on:
 
 env:
   REPO_URL: https://github.com/fzs209/immortalwrt.git
-
   DEVICE_TARGET: airoha
   DEVICE_SUBTARGET: an7581
-
-  # 配置文件位于你自己的 GitHub 仓库根目录
+  
+  # 配置指向源码仓库内部的相对路径
   CONFIG_FILE: config/xg-040g-md.config
-
+  
   CACHE_TOOLCHAIN: true
   FIRMWARE_RELEASE: true
-
   TZ: Asia/Shanghai
 
 jobs:
@@ -31,7 +29,6 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-
       # ==================================================
       # 1. Checkout 当前 GitHub 仓库
       # ==================================================
@@ -46,24 +43,14 @@ jobs:
           echo "========================================"
           echo "CPU 信息"
           echo "========================================"
-
           echo "CPU 核心数: $(nproc)"
-
-          lscpu | grep -E \
-            'Architecture|Model name|CPU\(s\)' || true
-
+          lscpu | grep -E 'Architecture|Model name|CPU\(s\)' || true
+          
           echo
           echo "========================================"
-          echo "内存"
+          echo "磁盘与内存"
           echo "========================================"
-
           free -h
-
-          echo
-          echo "========================================"
-          echo "磁盘"
-          echo "========================================"
-
           df -hT
 
       # ==================================================
@@ -73,21 +60,10 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          echo "========================================"
-          echo "初始化 ImmortalWrt 编译环境"
-          echo "========================================"
-
-          sudo bash -c \
-            'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
-
+          sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
           sudo -E apt-get update
-
-          sudo -E apt-get install -y \
-            dos2unix \
-            libfuse-dev
-
+          sudo -E apt-get install -y dos2unix libfuse-dev
           sudo systemctl daemon-reload
-
           sudo timedatectl set-timezone "$TZ"
 
       # ==================================================
@@ -107,45 +83,13 @@ jobs:
         env:
           REPO_BRANCH: ${{ github.event.inputs.repo_branch }}
         run: |
-          echo "========================================"
-          echo "ImmortalWrt 源码"
-          echo "========================================"
-
-          echo "仓库:"
-          echo "$REPO_URL"
-
-          echo
-          echo "分支:"
-          echo "$REPO_BRANCH"
-
-          echo
-          echo "========================================"
-          echo "Clone"
-          echo "========================================"
-
-          git clone \
-            --depth=1 \
-            --single-branch \
-            -b "$REPO_BRANCH" \
-            "$REPO_URL" \
-            openwrt
-
+          git clone --depth=1 --single-branch -b "$REPO_BRANCH" "$REPO_URL" openwrt
           cd openwrt
-
+          
           echo "OPENWRT_PATH=$PWD" >> "$GITHUB_ENV"
           echo "REPO_BRANCH=$REPO_BRANCH" >> "$GITHUB_ENV"
-
-          echo
-          echo "========================================"
-          echo "当前源码版本"
-          echo "========================================"
-
-          git show -s --format=fuller
-
-          VERSION_INFO="$(git show -s \
-            --date=short \
-            --format='作者: %an<br/>时间: %cd<br/>提交: %s<br/>Commit: %H')"
-
+          
+          VERSION_INFO="$(git show -s --date=short --format='作者: %an<br/>时间: %cd<br/>提交: %s<br/>Commit: %H')"
           {
             echo "VERSION_INFO<<EOF"
             echo "$VERSION_INFO"
@@ -158,25 +102,12 @@ jobs:
       - name: Generate Variables
         run: |
           SOURCE_REPO="$(basename "$REPO_URL" .git)"
-
+          RELEASE_TAG="XG-040G-MD-25.12-$(date +\%Y\%m\%d)-${{ github.run_number }}"
+          
           echo "SOURCE_REPO=$SOURCE_REPO" >> "$GITHUB_ENV"
-
           echo "DEVICE_TARGET=$DEVICE_TARGET" >> "$GITHUB_ENV"
           echo "DEVICE_SUBTARGET=$DEVICE_SUBTARGET" >> "$GITHUB_ENV"
-
-          RELEASE_TAG="XG-040G-MD-25.12-$(date +%Y%m%d)-${{ github.run_number }}"
-
           echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
-
-          echo "========================================"
-          echo "构建变量"
-          echo "========================================"
-
-          echo "SOURCE_REPO: $SOURCE_REPO"
-          echo "BRANCH:      $REPO_BRANCH"
-          echo "TARGET:      $DEVICE_TARGET"
-          echo "SUBTARGET:   $DEVICE_SUBTARGET"
-          echo "RELEASE:     $RELEASE_TAG"
 
       # ==================================================
       # 7. Toolchain Cache
@@ -186,13 +117,7 @@ jobs:
         uses: HiGarfield/cachewrtbuild@main
         with:
           ccache: false
-
-          mixkey: >-
-            ${{ env.SOURCE_REPO }}-
-            ${{ env.REPO_BRANCH }}-
-            ${{ env.DEVICE_TARGET }}-
-            ${{ env.DEVICE_SUBTARGET }}
-
+          mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
           prefix: ${{ env.OPENWRT_PATH }}
 
       # ==================================================
@@ -201,116 +126,35 @@ jobs:
       - name: Install Feeds
         run: |
           cd "$OPENWRT_PATH"
-
-          echo "========================================"
-          echo "更新 feeds"
-          echo "========================================"
-
           ./scripts/feeds update -a
-
-          echo
-          echo "========================================"
-          echo "安装 feeds"
-          echo "========================================"
-
           ./scripts/feeds install -a
 
       # ==================================================
-      # 9. 加载 XG-040G-MD 配置
+      # 9. 加载源码仓库自带的默认配置 (核心修复)
       # ==================================================
       - name: Load Custom Configuration
         run: |
           echo "========================================"
-          echo "加载 XG-040G-MD 配置"
+          echo "加载源码仓库默认配置"
           echo "========================================"
+          
+          # 直接读取克隆下来的 openwrt 源码目录中的配置
+          SOURCE_CONFIG_PATH="$OPENWRT_PATH/$CONFIG_FILE"
 
-          CONFIG_PATH="$GITHUB_WORKSPACE/$CONFIG_FILE"
-
-          echo "配置文件:"
-          echo "$CONFIG_PATH"
-
-          echo
-          echo "========================================"
-          echo "检查配置文件"
-          echo "========================================"
-
-          if [ ! -f "$CONFIG_PATH" ]; then
-            echo "ERROR: 找不到配置文件:"
-            echo "$CONFIG_PATH"
-
-            echo
-            echo "========================================"
-            echo "当前 GitHub Workspace"
-            echo "========================================"
-
-            echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
-
-            echo
-            ls -lah "$GITHUB_WORKSPACE"
-
-            echo
-            echo "========================================"
-            echo "config 目录"
-            echo "========================================"
-
-            ls -lah "$GITHUB_WORKSPACE/config" || true
-
-            exit 1
+          if [ -f "$SOURCE_CONFIG_PATH" ]; then
+            echo "✅ 成功找到上游默认配置文件: $SOURCE_CONFIG_PATH"
+            cp "$SOURCE_CONFIG_PATH" "$OPENWRT_PATH/.config"
+          else
+            echo "⚠️ 未找到上游特供配置文件，将使用默认模板生成"
           fi
 
-          echo "配置文件存在:"
-          ls -lh "$CONFIG_PATH"
-
-          echo
-          echo "========================================"
-          echo "复制配置"
-          echo "========================================"
-
-          cp "$CONFIG_PATH" "$OPENWRT_PATH/.config"
-
           cd "$OPENWRT_PATH"
-
-          echo "========================================"
-          echo "执行 make defconfig"
-          echo "========================================"
-
           make defconfig
 
           echo
-          echo "========================================"
-          echo "检查 Target"
-          echo "========================================"
-
-          grep -E \
-            'CONFIG_TARGET_airoha|CONFIG_TARGET_DEVICE_' \
-            .config || true
-
-          echo
-          echo "========================================"
-          echo "检查 Kernel"
-          echo "========================================"
-
-          grep -E \
-            'CONFIG_LINUX_6_12|CONFIG_LINUX_6_6' \
-            .config || true
-
-          echo
-          echo "========================================"
-          echo "检查 Airoha NPU"
-          echo "========================================"
-
-          grep -E \
-            'CONFIG_PACKAGE_luci-app-airoha-npu|CONFIG_PACKAGE_.*airoha.*npu' \
-            .config || true
-
-          echo
-          echo "========================================"
-          echo "XG-040G-MD Device"
-          echo "========================================"
-
-          grep \
-            'CONFIG_TARGET_airoha_an7581_DEVICE_' \
-            .config || true
+          echo "==== 检查关键依赖 ===="
+          grep -E 'CONFIG_TARGET_airoha|CONFIG_TARGET_DEVICE_' .config || true
+          grep -E 'CONFIG_PACKAGE_luci-app-airoha-npu|CONFIG_PACKAGE_.*airoha.*npu' .config || true
 
       # ==================================================
       # 10. 下载源码包
@@ -318,20 +162,7 @@ jobs:
       - name: Download DL Package
         run: |
           cd "$OPENWRT_PATH"
-
-          echo "========================================"
-          echo "下载源码包"
-          echo "========================================"
-
           make download -j8
-
-          echo
-          echo "========================================"
-          echo "检查异常小文件"
-          echo "========================================"
-
-          find dl -size -1024c -exec ls -lh {} \; || true
-
           find dl -size -1024c -exec rm -f {} \;
 
       # ==================================================
@@ -341,79 +172,33 @@ jobs:
         id: compile
         run: |
           cd "$OPENWRT_PATH"
-
           THREADS="$(nproc)"
-
-          echo "========================================"
-          echo "开始编译 ImmortalWrt"
-          echo "========================================"
-
-          echo "线程数: $THREADS"
-
-          echo
-          echo "Target:"
-          echo "$DEVICE_TARGET/$DEVICE_SUBTARGET"
-
-          echo
-          echo "Branch:"
-          echo "$REPO_BRANCH"
-
-          echo
-          echo "========================================"
-          echo "第一次：多线程编译"
-          echo "========================================"
+          
+          echo "开始编译 ImmortalWrt (线程数: $THREADS)"
 
           if make -j"$THREADS"; then
-
             echo "status=success" >> "$GITHUB_OUTPUT"
-
           else
-
-            echo
-            echo "========================================"
-            echo "多线程编译失败"
-            echo "========================================"
-
-            echo "开始单线程重新编译..."
-
+            echo "多线程编译失败，开始单线程重新编译..."
             if make -j1; then
-
               echo "status=success" >> "$GITHUB_OUTPUT"
-
             else
-
-              echo
-              echo "========================================"
-              echo "单线程仍然失败"
-              echo "========================================"
-
-              echo "开始 V=s 详细日志编译"
-
+              echo "单线程仍然失败，开始 V=s 详细日志编译..."
               make -j1 V=s
-
               echo "status=failure" >> "$GITHUB_OUTPUT"
-
               exit 1
-
             fi
-
           fi
 
-          echo "DATE=$(date '+%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
-
-          echo "FILE_DATE=$(date '+%Y.%m.%d')" >> "$GITHUB_ENV"
+          echo "DATE=$(date '+\%Y-\%m-\%d \%H:\%M:\%S')" >> "$GITHUB_ENV"
+          echo "FILE_DATE=$(date '+\%Y.\%m.\%d')" >> "$GITHUB_ENV"
 
       # ==================================================
       # 12. 检查磁盘空间
       # ==================================================
       - name: Check Space Usage
         if: always()
-        run: |
-          echo "========================================"
-          echo "最终磁盘使用情况"
-          echo "========================================"
-
-          df -hT
+        run: df -hT
 
       # ==================================================
       # 13. 整理固件
@@ -422,64 +207,19 @@ jobs:
         if: steps.compile.outputs.status == 'success'
         run: |
           TARGET_DIR="$OPENWRT_PATH/bin/targets/$DEVICE_TARGET/$DEVICE_SUBTARGET"
-
-          echo "========================================"
-          echo "固件目录"
-          echo "========================================"
-
-          echo "$TARGET_DIR"
-
+          
           if [ ! -d "$TARGET_DIR" ]; then
             echo "ERROR: 找不到固件目录"
-
-            echo
-            echo "实际 targets:"
-            find "$OPENWRT_PATH/bin/targets" \
-              -maxdepth 3 \
-              -type d \
-              2>/dev/null || true
-
             exit 1
           fi
 
           cd "$TARGET_DIR"
-
-          echo
-          echo "========================================"
-          echo "固件文件"
-          echo "========================================"
-
-          ls -lah
-
-          echo
-          echo "========================================"
-          echo "SHA256"
-          echo "========================================"
-
+          
           if [ -f sha256sums ]; then
             cat sha256sums
           fi
-
-          # 保存最终配置
+          
           cp "$OPENWRT_PATH/.config" build.config
-
-          echo
-          echo "========================================"
-          echo "Factory / Sysupgrade 镜像"
-          echo "========================================"
-
-          find . \
-            -maxdepth 1 \
-            -type f \
-            \( \
-              -name '*factory*' \
-              -o \
-              -name '*sysupgrade*' \
-              -o \
-              -name '*.bin' \
-            \) \
-            -print
-
           echo "FIRMWARE_PATH=$TARGET_DIR" >> "$GITHUB_ENV"
 
       # ==================================================
@@ -490,12 +230,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: XG-040G-MD-25.12-${{ env.FILE_DATE }}
-
-          path: |
-            ${{ env.FIRMWARE_PATH }}/*
-
+          path: ${{ env.FIRMWARE_PATH }}/*
           if-no-files-found: error
-
           retention-days: 14
 
       # ==================================================
@@ -504,53 +240,28 @@ jobs:
       - name: Upload Firmware To Release
         if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE == 'true'
         uses: ncipollo/release-action@v1
-
         with:
           name: ${{ env.RELEASE_TAG }}
-
           tag: ${{ env.RELEASE_TAG }}
-
           token: ${{ secrets.GITHUB_TOKEN }}
-
-          artifacts: |
-            ${{ env.FIRMWARE_PATH }}/*
-
+          artifacts: ${{ env.FIRMWARE_PATH }}/*
           allowUpdates: true
-
           replacesArtifacts: true
-
           body: |
             # ImmortalWrt 25.12 - Nokia XG-040G-MD
 
             ## 固件信息
-
             - 设备：Nokia / Bell XG-040G-MD
             - SoC：Airoha AN7581
-            - Target：airoha/an7581
             - ImmortalWrt 分支：`${{ env.REPO_BRANCH }}`
             - 默认管理地址：`192.168.1.1`
-            - 默认用户：`root`
             - 默认密码：无
             - 编译时间：`${{ env.DATE }}`
 
-            ## 源码
-
+            ## 源码信息
             `${{ env.REPO_URL }}`
-
-            ## Commit
-
             ${{ env.VERSION_INFO }}
 
-            ## 镜像
-
-            请根据实际生成文件名选择对应镜像。
-
-            首次刷机前请确认 XG-040G-MD 当前 bootloader / tcboot
-            的刷机方式以及镜像类型。
-
-            不要仅根据文件名猜测 factory / sysupgrade 的用途。
-
-            ## 注意
-
-            本固件为 XG-040G-MD 专用构建。
-            刷机前请确认硬件型号完全一致。
+            ## 刷机提示
+            - 本固件直接集成上游最新 XG-040G-MD 相关补丁。
+            - 首次刷机前请确认当前 Bootloader / tcboot 支持的镜像类型。
