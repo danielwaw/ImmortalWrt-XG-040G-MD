@@ -1,4 +1,4 @@
-name: Build ImmortalWrt 24.10 for XG-040G-MD
+name: Build ImmortalWrt 25.12 for XG-040G-MD
 
 on:
   workflow_dispatch:
@@ -6,135 +6,339 @@ on:
       repo_branch:
         description: '选择编译分支'
         required: true
-        default: 'openwrt-24.10'
+        default: 'openwrt-25.12-XG-040G-MD'
         type: choice
         options:
-          - openwrt-24.10
-          - master-XG-040G-MD
           - openwrt-25.12-XG-040G-MD
+          - master-XG-040G-MD
 
 env:
   REPO_URL: https://github.com/fzs209/immortalwrt.git
   DEVICE_TARGET: airoha
   DEVICE_SUBTARGET: an7581
-  CONFIG_FILE: config/xg-040g-md.config
+  CONFIG_FILE: ${{ github.workspace }}/config/xg-040g-md.config
   CACHE_TOOLCHAIN: true
   FIRMWARE_RELEASE: true
   TZ: Asia/Shanghai
 
 jobs:
   Build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      # --------------------------------------------------
+      # 1. Checkout workflow repository
+      # --------------------------------------------------
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
 
-    - name: Check server performance
-      run: |
-        echo "--------------------------CPU信息--------------------------"
-        echo "CPU核心数：$(nproc)"
-        echo "--------------------------硬盘信息--------------------------"
-        df -hT
+      # --------------------------------------------------
+      # 2. Check build environment
+      # --------------------------------------------------
+      - name: Check server performance
+        run: |
+          echo "================ CPU ================"
+          echo "CPU核心数: $(nproc)"
+          echo "CPU型号:"
+          lscpu | grep -E 'Model name|Architecture|CPU\(s\)' || true
 
-    - name: Initialization Environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
-        sudo -E apt -yqq install dos2unix libfuse-dev
-        sudo -E systemctl daemon-reload
-        sudo timedatectl set-timezone "$TZ"
+          echo
+          echo "================ Memory ================"
+          free -h
 
-    - name: Combine Disks
-      uses: easimon/maximize-build-space@v5
-      with:
-        swap-size-mb: 1024
-        temp-reserve-mb: 100
-        root-reserve-mb: 1024
+          echo
+          echo "================ Disk ================"
+          df -hT
 
-    - name: Clone Source Code and Merge Patches
-      env:
-        REPO_BRANCH: ${{ github.event.inputs.repo_branch }}
-      run: |
-        # 1. 克隆真正的 openwrt-24.10 分支（无多余后缀）
-        git clone "$REPO_URL" -b "$REPO_BRANCH" openwrt
-        cd openwrt
-        
-        # 2. 如果选择 24.10，自动把 master-XG-040G-MD 分支的硬件驱动补丁合并进来
-        if [ "$REPO_BRANCH" = "openwrt-24.10" ]; then
-          echo "==== 正在将 XG-040G-MD 专属硬件补丁注入 24.10 分支 ===="
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git fetch origin master-XG-040G-MD
-          git merge origin/master-XG-040G-MD --no-edit -m "Merge XG-040G-MD hardware patches" || true
-        fi
+      # --------------------------------------------------
+      # 3. Initialize build environment
+      # --------------------------------------------------
+      - name: Initialization Environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo bash -c \
+            'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
 
-        echo "OPENWRT_PATH=$PWD" >> $GITHUB_ENV
-        echo "REPO_BRANCH=$REPO_BRANCH" >> $GITHUB_ENV
+          sudo -E apt-get update
+          sudo -E apt-get install -y dos2unix libfuse-dev
 
-    - name: Generate Variables
-      run: |
-        SOURCE_REPO="$(echo$REPO_URL | awk -F '/' '{print $(NF)}' \vert{} sed 's/\.git$//')"
-        echo "SOURCE_REPO=$SOURCE_REPO" >> $GITHUB_ENV
-        echo "RELEASE_TAG=XG-040G-MD-24.10-$(date +"%Y%m%d")-${{ github.run_number }}" >> $GITHUB_ENV
+          sudo systemctl daemon-reload
+          sudo timedatectl set-timezone "$TZ"
 
-    - name: Cache Toolchain
-      if: env.CACHE_TOOLCHAIN == 'true'
-      uses: HiGarfield/cachewrtbuild@main
-      with:
-        ccache: false
-        mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
-        prefix: ${{ env.OPENWRT_PATH }}
+      # --------------------------------------------------
+      # 4. Maximize available disk space
+      # --------------------------------------------------
+      - name: Combine Disks
+        uses: easimon/maximize-build-space@master
+        with:
+          swap-size-mb: 1024
+          temp-reserve-mb: 100
+          root-reserve-mb: 1024
 
-    - name: Install Feeds
-      run: |
-        cd $OPENWRT_PATH
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
+      # --------------------------------------------------
+      # 5. Clone ImmortalWrt source
+      # --------------------------------------------------
+      - name: Clone Source Code
+        env:
+          REPO_BRANCH: ${{ github.event.inputs.repo_branch }}
+        run: |
+          echo "========================================"
+          echo "ImmortalWrt branch:"
+          echo "$REPO_BRANCH"
+          echo "========================================"
 
-    - name: Load Custom Configuration
-      run: |
-        [ -e $CONFIG_FILE ] && cp $CONFIG_FILE$OPENWRT_PATH/.config
-        cd $OPENWRT_PATH
-        make defconfig
+          git clone \
+            --depth=1 \
+            --single-branch \
+            -b "$REPO_BRANCH" \
+            "$REPO_URL" \
+            openwrt
 
-    - name: Download DL Package
-      run: |
-        cd $OPENWRT_PATH
-        make download -j8
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
+          cd openwrt
 
-    - name: Compile Firmware
-      id: compile
-      run: |
-        cd $OPENWRT_PATH
-        echo "Building with $(nproc) threads..."
-        make -j$(nproc) || make -j1 || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
-        echo "DATE=$(date +"\%Y-\%m-\%d \%H:\%M:\%S")" >> $GITHUB_ENV
+          echo "OPENWRT_PATH=$PWD" >> "$GITHUB_ENV"
+          echo "REPO_BRANCH=$REPO_BRANCH" >> "$GITHUB_ENV"
 
-    - name: Organize Files
-      if: steps.compile.outputs.status == 'success'
-      run: |
-        cd $OPENWRT_PATH/bin/targets/*/*
-        cp $OPENWRT_PATH/.config build.config
-        echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+          VERSION_INFO="$(git show -s \
+            --date=short \
+            --format='作者: %an<br/>时间: %cd<br/>内容: %s<br/>hash: %H')"
 
-    - name: Upload Firmware To Release
-      if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE == 'true'
-      uses: ncipollo/release-action@v1
-      with:
-        name: ${{ env.RELEASE_TAG }}
-        tag: ${{ env.RELEASE_TAG }}
-        token: ${{ secrets.GITHUB_TOKEN }}
-        artifacts: ${{ env.FIRMWARE_PATH }}/*
-        body: |
-          **ImmortalWrt 24.10 Firmware for Nokia XG-040G-MD**
-          - 💻 基础分支：${{ env.REPO_BRANCH }}
-          - 🛠️ 补丁集成：已自动注入双闪存识别与 NPU 加速驱动补丁
-          - 🌐 默认管理 IP: 192.168.1.1
-          - 🔑 默认密码: 无
-          - 📅 编译时间: ${{ env.DATE }}
-          - ⚠️ 刷机说明：首次刷机请在 tcboot (192.168.1.1) Web 界面上传以 `.squashfs-factory.bin` 结尾的文件。
+          {
+            echo "VERSION_INFO<<EOF"
+            echo "$VERSION_INFO"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
+          echo
+          echo "==== 当前源码提交 ===="
+          git show -s --format=fuller
+
+      # --------------------------------------------------
+      # 6. Generate variables
+      # --------------------------------------------------
+      - name: Generate Variables
+        run: |
+          SOURCE_REPO="$(basename "$REPO_URL" .git)"
+
+          echo "SOURCE_REPO=$SOURCE_REPO" >> "$GITHUB_ENV"
+          echo "DEVICE_TARGET=$DEVICE_TARGET" >> "$GITHUB_ENV"
+          echo "DEVICE_SUBTARGET=$DEVICE_SUBTARGET" >> "$GITHUB_ENV"
+
+          RELEASE_TAG="XG-040G-MD-25.12-$(date +%Y%m%d)-${{ github.run_number }}"
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+
+          echo "SOURCE_REPO=$SOURCE_REPO"
+          echo "DEVICE_TARGET=$DEVICE_TARGET"
+          echo "DEVICE_SUBTARGET=$DEVICE_SUBTARGET"
+          echo "RELEASE_TAG=$RELEASE_TAG"
+
+      # --------------------------------------------------
+      # 7. Cache toolchain
+      # --------------------------------------------------
+      - name: Cache Toolchain
+        if: env.CACHE_TOOLCHAIN == 'true'
+        uses: HiGarfield/cachewrtbuild@main
+        with:
+          ccache: false
+          mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
+          prefix: ${{ env.OPENWRT_PATH }}
+
+      # --------------------------------------------------
+      # 8. Install feeds
+      # --------------------------------------------------
+      - name: Install Feeds
+        run: |
+          cd "$OPENWRT_PATH"
+
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # --------------------------------------------------
+      # 9. Load XG-040G-MD config
+      # --------------------------------------------------
+      - name: Load Custom Configuration
+        run: |
+          cd "$OPENWRT_PATH"
+
+          echo "==== 加载配置文件 ===="
+
+          if [ -f "$CONFIG_FILE" ]; then
+            cp "$CONFIG_FILE" .config
+            echo "已加载: $CONFIG_FILE"
+          else
+            echo "ERROR: 找不到配置文件:"
+            echo "$CONFIG_FILE"
+            exit 1
+          fi
+
+          echo
+          echo "==== 执行 make defconfig ===="
+          make defconfig
+
+          echo
+          echo "==== 检查关键配置 ===="
+          grep -E \
+            'CONFIG_TARGET_airoha|CONFIG_TARGET_DEVICE|CONFIG_LINUX_6_12|CONFIG_PACKAGE_luci-app-airoha-npu' \
+            .config || true
+
+          echo
+          echo "==== 最终设备配置 ===="
+          grep 'CONFIG_TARGET_airoha_an7581_DEVICE_' .config || true
+
+      # --------------------------------------------------
+      # 10. Download source packages
+      # --------------------------------------------------
+      - name: Download DL Package
+        run: |
+          cd "$OPENWRT_PATH"
+
+          make download -j8
+
+          echo
+          echo "==== 检查异常小文件 ===="
+
+          find dl -size -1024c -exec ls -lh {} \;
+
+          find dl -size -1024c -exec rm -f {} \;
+
+      # --------------------------------------------------
+      # 11. Compile
+      # --------------------------------------------------
+      - name: Compile Firmware
+        id: compile
+        run: |
+          cd "$OPENWRT_PATH"
+
+          THREADS="$(nproc)"
+
+          echo "========================================"
+          echo "开始编译"
+          echo "并行线程: $THREADS"
+          echo "========================================"
+
+          if make -j"$THREADS"; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          else
+            echo
+            echo "========================================"
+            echo "并行编译失败，开始单线程重试"
+            echo "========================================"
+
+            if make -j1; then
+              echo "status=success" >> "$GITHUB_OUTPUT"
+            else
+              echo
+              echo "========================================"
+              echo "单线程仍然失败，开始详细日志编译"
+              echo "========================================"
+
+              make -j1 V=s
+
+              echo "status=failure" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+          fi
+
+          echo "DATE=$(date '+%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
+          echo "FILE_DATE=$(date '+%Y.%m.%d')" >> "$GITHUB_ENV"
+
+      # --------------------------------------------------
+      # 12. Check disk space
+      # --------------------------------------------------
+      - name: Check Space Usage
+        if: always()
+        run: |
+          echo "==== 磁盘使用情况 ===="
+          df -hT
+
+      # --------------------------------------------------
+      # 13. Organize firmware
+      # --------------------------------------------------
+      - name: Organize Files
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          cd "$OPENWRT_PATH/bin/targets/$DEVICE_TARGET/$DEVICE_SUBTARGET"
+
+          echo "==== 固件目录 ===="
+          pwd
+          echo
+
+          echo "==== 固件文件 ===="
+          ls -lah
+
+          echo
+          echo "==== SHA256 ===="
+          if [ -f sha256sums ]; then
+            cat sha256sums
+          fi
+
+          # 保存最终 .config
+          cp "$OPENWRT_PATH/.config" build.config
+
+          # 获取 kernel 版本
+          KERNEL_VERSION="$(find . \
+            -type f \
+            -name '*.manifest' \
+            -exec grep -h -oP '^kernel - \K.*?(?=~|-\d+-)' {} \; \
+            | head -n1 || true)"
+
+          echo "VERSION_KERNEL=$KERNEL_VERSION" >> "$GITHUB_ENV"
+          echo "FIRMWARE_PATH=$PWD" >> "$GITHUB_ENV"
+
+      # --------------------------------------------------
+      # 14. Upload as artifact
+      # --------------------------------------------------
+      - name: Upload Firmware Artifact
+        if: steps.compile.outputs.status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: XG-040G-MD-25.12-${{ env.FILE_DATE }}
+          path: |
+            ${{ env.FIRMWARE_PATH }}/*
+          if-no-files-found: error
+          retention-days: 14
+
+      # --------------------------------------------------
+      # 15. Create GitHub Release
+      # --------------------------------------------------
+      - name: Upload Firmware To Release
+        if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE == 'true'
+        uses: ncipollo/release-action@v1
+        with:
+          name: ${{ env.RELEASE_TAG }}
+          tag: ${{ env.RELEASE_TAG }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+          artifacts: |
+            ${{ env.FIRMWARE_PATH }}/*
+
+          allowUpdates: true
+          replacesArtifacts: true
+
+          body: |
+            # ImmortalWrt 25.12 - Nokia XG-040G-MD
+
+            ## 固件信息
+
+            - 设备：Nokia / Bell XG-040G-MD
+            - 平台：Airoha AN7581
+            - 分支：`${{ env.REPO_BRANCH }}`
+            - 固件源码：${{ env.REPO_URL }}
+            - 默认地址：`192.168.1.1`
+            - 默认用户：`root`
+            - 默认密码：无
+            - 编译时间：`${{ env.DATE }}`
+            - Kernel：`${{ env.VERSION_KERNEL }}`
+
+            ## 源码信息
+
+            ${{ env.VERSION_INFO }}
+
+            ## 文件说明
+
+            请优先确认生成的：
+            - `*.squashfs-factory.bin`
+            - `*.sysupgrade.bin`
+
+            首次刷机请按照 XG-040G-MD 对应的 tcboot 刷机方式操作。
