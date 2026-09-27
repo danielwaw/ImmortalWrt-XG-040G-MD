@@ -1,4 +1,4 @@
-name: Build Custom AdGuardHome IPK
+name: Build Custom AdGuardHome IPK (25.12)
 
 on:
   workflow_dispatch:
@@ -16,12 +16,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y zstd build-essential ccache gettext git libncurses5-dev libssl-dev rsync unzip zlib1g-dev
 
-      - name: Download and extract OpenWrt 24.10 SDK
+      - name: Download and extract OpenWrt 25.12 SDK
         run: |
           mkdir -p sdk
-          SDK_URL="https://downloads.openwrt.org/releases/24.10.0/targets/armsr/armv8/openwrt-sdk-24.10.0-armsr-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+          SDK_URL="https://downloads.openwrt.org/releases/25.12.0/targets/armsr/armv8/openwrt-sdk-25.12.0-armsr-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
           echo "Downloading SDK from ${SDK_URL}..."
-          curl -fsSL "${SDK_URL}" -o sdk.tar.zst
+          
+          # 优先尝试 25.12.0 release SDK，若找不到则自动降级切换至 25.12/snapshots SDK
+          if ! curl -fsSL "${SDK_URL}" -o sdk.tar.zst; then
+            echo "未找到 25.12.0 静态 SDK 发行包，自动切换至 snapshots 开发版 SDK..."
+            curl -fsSL "https://downloads.openwrt.org/snapshots/targets/armsr/armv8/openwrt-sdk-armsr-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst" -o sdk.tar.zst
+          fi
+
           tar --zstd -xf sdk.tar.zst -C sdk --strip-components=1
           rm -f sdk.tar.zst
 
@@ -36,7 +42,7 @@ jobs:
           # 2. 安装 luci-app-adguardhome 及其依赖
           ./scripts/feeds install luci-app-adguardhome
           
-          # 3. 关键修复：写入 .config 触发编译规则生成
+          # 3. 写入 .config 触发编译规则生成
           echo "CONFIG_PACKAGE_luci-app-adguardhome=m" >> .config
           
           # 4. 生成编译配置
@@ -51,7 +57,7 @@ jobs:
       - name: Collect and Upload IPK Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: luci-app-adguardhome-ipk
+          name: luci-app-adguardhome-ipk-25.12
           path: |
             sdk/bin/packages/**/luci-app-adguardhome*.ipk
             sdk/bin/packages/**/adguardhome*.ipk
