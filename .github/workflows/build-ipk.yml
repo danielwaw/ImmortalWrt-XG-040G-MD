@@ -1,0 +1,62 @@
+name: Build Custom IPKs (AdGuardHome & Tailscale)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ipk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install SDK build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd build-essential ccache gettext git libncurses5-dev libssl-dev rsync unzip zlib1g-dev
+
+      - name: Download and extract OpenWrt 24.10 SDK
+        run: |
+          mkdir -p sdk
+          SDK_URL="https://downloads.openwrt.org/releases/24.10.0/targets/armsr/armv8/openwrt-sdk-24.10.0-armsr-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+          echo "Downloading SDK from ${SDK_URL}..."
+          curl -fsSL "${SDK_URL}" -o sdk.tar.zst
+          tar --zstd -xf sdk.tar.zst -C sdk --strip-components=1
+          rm -f sdk.tar.zst
+
+      - name: Setup feeds and install packages
+        run: |
+          cd sdk
+          
+          # 1. 注入 kenzok8 常用软件源（包含 AdGuardHome 和 Tailscale 界面）
+          echo "src-git kenzok8 https://github.com/kenzok8/openwrt-packages.git" >> feeds.conf.default
+          ./scripts/feeds update -a
+          
+          # 2. 针对性安装 AdGuardHome 和 Tailscale 的 LuCI 界面
+          ./scripts/feeds install luci-app-adguardhome
+          ./scripts/feeds install luci-app-tailscale
+          
+          # 3. 生成配置
+          make defconfig
+
+      - name: Compile AdGuardHome IPK
+        run: |
+          cd sdk
+          make package/luci-app-adguardhome/compile V=s -j$(nproc) || make package/luci-app-adguardhome/compile V=s -j1
+
+      - name: Compile Tailscale IPK
+        run: |
+          cd sdk
+          make package/luci-app-tailscale/compile V=s -j$(nproc) || make package/luci-app-tailscale/compile V=s -j1
+
+      - name: Collect and Upload IPK Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-openwrt-ipks-24.10
+          path: |
+            sdk/bin/packages/**/luci-app-adguardhome*.ipk
+            sdk/bin/packages/**/adguardhome*.ipk
+            sdk/bin/packages/**/luci-app-tailscale*.ipk
+            sdk/bin/packages/**/tailscale*.ipk
+            sdk/bin/packages/**/luci-i18n-*-zh-cn*.ipk
