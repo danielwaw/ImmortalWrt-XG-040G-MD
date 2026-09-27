@@ -6,10 +6,9 @@ on:
       repo_branch:
         description: '选择编译分支'
         required: true
-        default: 'openwrt-24.10-XG-040G-MD'
+        default: 'master-XG-040G-MD'
         type: choice
         options:
-          - openwrt-24.10-XG-040G-MD
           - master-XG-040G-MD
           - openwrt-25.12-XG-040G-MD
 
