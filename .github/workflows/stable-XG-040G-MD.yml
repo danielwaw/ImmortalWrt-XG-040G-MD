@@ -24,6 +24,9 @@ env:
   FIRMWARE_RELEASE: true
   TZ: Asia/Shanghai
 
+permissions:
+  contents: write
+
 jobs:
   Build:
     runs-on: ubuntu-22.04
