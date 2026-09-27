@@ -16,17 +16,23 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y zstd build-essential ccache gettext git libncurses5-dev libssl-dev rsync unzip zlib1g-dev
 
-      - name: Download and extract OpenWrt 25.12 SDK
+      - name: Download and extract OpenWrt SDK
         run: |
           mkdir -p sdk
-          SDK_URL="https://downloads.openwrt.org/releases/25.12.0/targets/armsr/armv8/openwrt-sdk-25.12.0-armsr-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
-          echo "Downloading SDK from ${SDK_URL}..."
+          BASE_URL="https://downloads.openwrt.org/snapshots/targets/armsr/armv8"
           
-          # 优先尝试 25.12.0 release SDK，若找不到则自动降级切换至 25.12/snapshots SDK
-          if ! curl -fsSL "${SDK_URL}" -o sdk.tar.zst; then
-            echo "未找到 25.12.0 静态 SDK 发行包，自动切换至 snapshots 开发版 SDK..."
-            curl -fsSL "https://downloads.openwrt.org/snapshots/targets/armsr/armv8/openwrt-sdk-armsr-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst" -o sdk.tar.zst
+          echo "正在从 ${BASE_URL}/sha256sums 获取最新的 SDK 文件名..."
+          SDK_FILE=$(curl -fsSL "${BASE_URL}/sha256sums" | grep -oP 'openwrt-sdk-.*\.tar\.zst' | head -n 1)
+          
+          if [ -z "$SDK_FILE" ]; then
+            echo "Snapshots SDK 解析失败，尝试从 24.10.0 稳定版读取..."
+            BASE_URL="https://downloads.openwrt.org/releases/24.10.0/targets/armsr/armv8"
+            SDK_FILE=$(curl -fsSL "${BASE_URL}/sha256sums" | grep -oP 'openwrt-sdk-.*\.tar\.zst' | head -n 1)
           fi
+
+          echo "解析到的 SDK 文件: ${SDK_FILE}"
+          echo "正在下载: ${BASE_URL}/${SDK_FILE}"
+          curl -fsSL "${BASE_URL}/${SDK_FILE}" -o sdk.tar.zst
 
           tar --zstd -xf sdk.tar.zst -C sdk --strip-components=1
           rm -f sdk.tar.zst
