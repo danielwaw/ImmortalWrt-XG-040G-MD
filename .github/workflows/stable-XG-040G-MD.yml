@@ -1,3 +1,4 @@
+```yaml
 name: Build ImmortalWrt 25.12 for XG-040G-MD
 
 on:
@@ -14,78 +15,113 @@ on:
 
 env:
   REPO_URL: https://github.com/fzs209/immortalwrt.git
+
   DEVICE_TARGET: airoha
   DEVICE_SUBTARGET: an7581
-  CONFIG_FILE: ${{ github.workspace }}/config/xg-040g-md.config
+
+  # 配置文件位于你自己的 GitHub 仓库根目录
+  CONFIG_FILE: config/xg-040g-md.config
+
   CACHE_TOOLCHAIN: true
   FIRMWARE_RELEASE: true
+
   TZ: Asia/Shanghai
 
 jobs:
   Build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
-      # --------------------------------------------------
-      # 1. Checkout workflow repository
-      # --------------------------------------------------
-      - name: Checkout workflow repository
+
+      # ==================================================
+      # 1. Checkout 当前 GitHub 仓库
+      # ==================================================
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --------------------------------------------------
-      # 2. Check build environment
-      # --------------------------------------------------
+      # ==================================================
+      # 2. 检查 GitHub Runner
+      # ==================================================
       - name: Check server performance
         run: |
-          echo "================ CPU ================"
-          echo "CPU核心数: $(nproc)"
-          echo "CPU型号:"
-          lscpu | grep -E 'Model name|Architecture|CPU\(s\)' || true
+          echo "========================================"
+          echo "CPU 信息"
+          echo "========================================"
+
+          echo "CPU 核心数: $(nproc)"
+
+          lscpu | grep -E \
+            'Architecture|Model name|CPU\(s\)' || true
 
           echo
-          echo "================ Memory ================"
+          echo "========================================"
+          echo "内存"
+          echo "========================================"
+
           free -h
 
           echo
-          echo "================ Disk ================"
+          echo "========================================"
+          echo "磁盘"
+          echo "========================================"
+
           df -hT
 
-      # --------------------------------------------------
-      # 3. Initialize build environment
-      # --------------------------------------------------
+      # ==================================================
+      # 3. 初始化编译环境
+      # ==================================================
       - name: Initialization Environment
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
+          echo "========================================"
+          echo "初始化 ImmortalWrt 编译环境"
+          echo "========================================"
+
           sudo bash -c \
             'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
 
           sudo -E apt-get update
-          sudo -E apt-get install -y dos2unix libfuse-dev
+
+          sudo -E apt-get install -y \
+            dos2unix \
+            libfuse-dev
 
           sudo systemctl daemon-reload
+
           sudo timedatectl set-timezone "$TZ"
 
-      # --------------------------------------------------
-      # 4. Maximize available disk space
-      # --------------------------------------------------
+      # ==================================================
+      # 4. 最大化可用磁盘空间
+      # ==================================================
       - name: Combine Disks
-        uses: easimon/maximize-build-space@master
+        uses: easimon/maximize-build-space@v5
         with:
           swap-size-mb: 1024
           temp-reserve-mb: 100
           root-reserve-mb: 1024
 
-      # --------------------------------------------------
-      # 5. Clone ImmortalWrt source
-      # --------------------------------------------------
+      # ==================================================
+      # 5. Clone ImmortalWrt
+      # ==================================================
       - name: Clone Source Code
         env:
           REPO_BRANCH: ${{ github.event.inputs.repo_branch }}
         run: |
           echo "========================================"
-          echo "ImmortalWrt branch:"
+          echo "ImmortalWrt 源码"
+          echo "========================================"
+
+          echo "仓库:"
+          echo "$REPO_URL"
+
+          echo
+          echo "分支:"
           echo "$REPO_BRANCH"
+
+          echo
+          echo "========================================"
+          echo "Clone"
           echo "========================================"
 
           git clone \
@@ -100,9 +136,16 @@ jobs:
           echo "OPENWRT_PATH=$PWD" >> "$GITHUB_ENV"
           echo "REPO_BRANCH=$REPO_BRANCH" >> "$GITHUB_ENV"
 
+          echo
+          echo "========================================"
+          echo "当前源码版本"
+          echo "========================================"
+
+          git show -s --format=fuller
+
           VERSION_INFO="$(git show -s \
             --date=short \
-            --format='作者: %an<br/>时间: %cd<br/>内容: %s<br/>hash: %H')"
+            --format='作者: %an<br/>时间: %cd<br/>提交: %s<br/>Commit: %H')"
 
           {
             echo "VERSION_INFO<<EOF"
@@ -110,101 +153,191 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_ENV"
 
-          echo
-          echo "==== 当前源码提交 ===="
-          git show -s --format=fuller
-
-      # --------------------------------------------------
-      # 6. Generate variables
-      # --------------------------------------------------
+      # ==================================================
+      # 6. 生成环境变量
+      # ==================================================
       - name: Generate Variables
         run: |
           SOURCE_REPO="$(basename "$REPO_URL" .git)"
 
           echo "SOURCE_REPO=$SOURCE_REPO" >> "$GITHUB_ENV"
+
           echo "DEVICE_TARGET=$DEVICE_TARGET" >> "$GITHUB_ENV"
           echo "DEVICE_SUBTARGET=$DEVICE_SUBTARGET" >> "$GITHUB_ENV"
 
           RELEASE_TAG="XG-040G-MD-25.12-$(date +%Y%m%d)-${{ github.run_number }}"
+
           echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
 
-          echo "SOURCE_REPO=$SOURCE_REPO"
-          echo "DEVICE_TARGET=$DEVICE_TARGET"
-          echo "DEVICE_SUBTARGET=$DEVICE_SUBTARGET"
-          echo "RELEASE_TAG=$RELEASE_TAG"
+          echo "========================================"
+          echo "构建变量"
+          echo "========================================"
 
-      # --------------------------------------------------
-      # 7. Cache toolchain
-      # --------------------------------------------------
+          echo "SOURCE_REPO: $SOURCE_REPO"
+          echo "BRANCH:      $REPO_BRANCH"
+          echo "TARGET:      $DEVICE_TARGET"
+          echo "SUBTARGET:   $DEVICE_SUBTARGET"
+          echo "RELEASE:     $RELEASE_TAG"
+
+      # ==================================================
+      # 7. Toolchain Cache
+      # ==================================================
       - name: Cache Toolchain
         if: env.CACHE_TOOLCHAIN == 'true'
         uses: HiGarfield/cachewrtbuild@main
         with:
           ccache: false
-          mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
+
+          mixkey: >-
+            ${{ env.SOURCE_REPO }}-
+            ${{ env.REPO_BRANCH }}-
+            ${{ env.DEVICE_TARGET }}-
+            ${{ env.DEVICE_SUBTARGET }}
+
           prefix: ${{ env.OPENWRT_PATH }}
 
-      # --------------------------------------------------
-      # 8. Install feeds
-      # --------------------------------------------------
+      # ==================================================
+      # 8. 更新 Feeds
+      # ==================================================
       - name: Install Feeds
         run: |
           cd "$OPENWRT_PATH"
 
+          echo "========================================"
+          echo "更新 feeds"
+          echo "========================================"
+
           ./scripts/feeds update -a
+
+          echo
+          echo "========================================"
+          echo "安装 feeds"
+          echo "========================================"
+
           ./scripts/feeds install -a
 
-      # --------------------------------------------------
-      # 9. Load XG-040G-MD config
-      # --------------------------------------------------
+      # ==================================================
+      # 9. 加载 XG-040G-MD 配置
+      # ==================================================
       - name: Load Custom Configuration
         run: |
-          cd "$OPENWRT_PATH"
+          echo "========================================"
+          echo "加载 XG-040G-MD 配置"
+          echo "========================================"
 
-          echo "==== 加载配置文件 ===="
+          CONFIG_PATH="$GITHUB_WORKSPACE/$CONFIG_FILE"
 
-          if [ -f "$CONFIG_FILE" ]; then
-            cp "$CONFIG_FILE" .config
-            echo "已加载: $CONFIG_FILE"
-          else
+          echo "配置文件:"
+          echo "$CONFIG_PATH"
+
+          echo
+          echo "========================================"
+          echo "检查配置文件"
+          echo "========================================"
+
+          if [ ! -f "$CONFIG_PATH" ]; then
             echo "ERROR: 找不到配置文件:"
-            echo "$CONFIG_FILE"
+            echo "$CONFIG_PATH"
+
+            echo
+            echo "========================================"
+            echo "当前 GitHub Workspace"
+            echo "========================================"
+
+            echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+
+            echo
+            ls -lah "$GITHUB_WORKSPACE"
+
+            echo
+            echo "========================================"
+            echo "config 目录"
+            echo "========================================"
+
+            ls -lah "$GITHUB_WORKSPACE/config" || true
+
             exit 1
           fi
 
+          echo "配置文件存在:"
+          ls -lh "$CONFIG_PATH"
+
           echo
-          echo "==== 执行 make defconfig ===="
+          echo "========================================"
+          echo "复制配置"
+          echo "========================================"
+
+          cp "$CONFIG_PATH" "$OPENWRT_PATH/.config"
+
+          cd "$OPENWRT_PATH"
+
+          echo "========================================"
+          echo "执行 make defconfig"
+          echo "========================================"
+
           make defconfig
 
           echo
-          echo "==== 检查关键配置 ===="
+          echo "========================================"
+          echo "检查 Target"
+          echo "========================================"
+
           grep -E \
-            'CONFIG_TARGET_airoha|CONFIG_TARGET_DEVICE|CONFIG_LINUX_6_12|CONFIG_PACKAGE_luci-app-airoha-npu' \
+            'CONFIG_TARGET_airoha|CONFIG_TARGET_DEVICE_' \
             .config || true
 
           echo
-          echo "==== 最终设备配置 ===="
-          grep 'CONFIG_TARGET_airoha_an7581_DEVICE_' .config || true
+          echo "========================================"
+          echo "检查 Kernel"
+          echo "========================================"
 
-      # --------------------------------------------------
-      # 10. Download source packages
-      # --------------------------------------------------
+          grep -E \
+            'CONFIG_LINUX_6_12|CONFIG_LINUX_6_6' \
+            .config || true
+
+          echo
+          echo "========================================"
+          echo "检查 Airoha NPU"
+          echo "========================================"
+
+          grep -E \
+            'CONFIG_PACKAGE_luci-app-airoha-npu|CONFIG_PACKAGE_.*airoha.*npu' \
+            .config || true
+
+          echo
+          echo "========================================"
+          echo "XG-040G-MD Device"
+          echo "========================================"
+
+          grep \
+            'CONFIG_TARGET_airoha_an7581_DEVICE_' \
+            .config || true
+
+      # ==================================================
+      # 10. 下载源码包
+      # ==================================================
       - name: Download DL Package
         run: |
           cd "$OPENWRT_PATH"
 
+          echo "========================================"
+          echo "下载源码包"
+          echo "========================================"
+
           make download -j8
 
           echo
-          echo "==== 检查异常小文件 ===="
+          echo "========================================"
+          echo "检查异常小文件"
+          echo "========================================"
 
-          find dl -size -1024c -exec ls -lh {} \;
+          find dl -size -1024c -exec ls -lh {} \; || true
 
           find dl -size -1024c -exec rm -f {} \;
 
-      # --------------------------------------------------
-      # 11. Compile
-      # --------------------------------------------------
+      # ==================================================
+      # 11. 编译
+      # ==================================================
       - name: Compile Firmware
         id: compile
         run: |
@@ -213,107 +346,178 @@ jobs:
           THREADS="$(nproc)"
 
           echo "========================================"
-          echo "开始编译"
-          echo "并行线程: $THREADS"
+          echo "开始编译 ImmortalWrt"
+          echo "========================================"
+
+          echo "线程数: $THREADS"
+
+          echo
+          echo "Target:"
+          echo "$DEVICE_TARGET/$DEVICE_SUBTARGET"
+
+          echo
+          echo "Branch:"
+          echo "$REPO_BRANCH"
+
+          echo
+          echo "========================================"
+          echo "第一次：多线程编译"
           echo "========================================"
 
           if make -j"$THREADS"; then
+
             echo "status=success" >> "$GITHUB_OUTPUT"
+
           else
+
             echo
             echo "========================================"
-            echo "并行编译失败，开始单线程重试"
+            echo "多线程编译失败"
             echo "========================================"
 
+            echo "开始单线程重新编译..."
+
             if make -j1; then
+
               echo "status=success" >> "$GITHUB_OUTPUT"
+
             else
+
               echo
               echo "========================================"
-              echo "单线程仍然失败，开始详细日志编译"
+              echo "单线程仍然失败"
               echo "========================================"
+
+              echo "开始 V=s 详细日志编译"
 
               make -j1 V=s
 
               echo "status=failure" >> "$GITHUB_OUTPUT"
+
               exit 1
+
             fi
+
           fi
 
           echo "DATE=$(date '+%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
+
           echo "FILE_DATE=$(date '+%Y.%m.%d')" >> "$GITHUB_ENV"
 
-      # --------------------------------------------------
-      # 12. Check disk space
-      # --------------------------------------------------
+      # ==================================================
+      # 12. 检查磁盘空间
+      # ==================================================
       - name: Check Space Usage
         if: always()
         run: |
-          echo "==== 磁盘使用情况 ===="
+          echo "========================================"
+          echo "最终磁盘使用情况"
+          echo "========================================"
+
           df -hT
 
-      # --------------------------------------------------
-      # 13. Organize firmware
-      # --------------------------------------------------
+      # ==================================================
+      # 13. 整理固件
+      # ==================================================
       - name: Organize Files
         if: steps.compile.outputs.status == 'success'
         run: |
-          cd "$OPENWRT_PATH/bin/targets/$DEVICE_TARGET/$DEVICE_SUBTARGET"
+          TARGET_DIR="$OPENWRT_PATH/bin/targets/$DEVICE_TARGET/$DEVICE_SUBTARGET"
 
-          echo "==== 固件目录 ===="
-          pwd
+          echo "========================================"
+          echo "固件目录"
+          echo "========================================"
+
+          echo "$TARGET_DIR"
+
+          if [ ! -d "$TARGET_DIR" ]; then
+            echo "ERROR: 找不到固件目录"
+
+            echo
+            echo "实际 targets:"
+            find "$OPENWRT_PATH/bin/targets" \
+              -maxdepth 3 \
+              -type d \
+              2>/dev/null || true
+
+            exit 1
+          fi
+
+          cd "$TARGET_DIR"
+
           echo
+          echo "========================================"
+          echo "固件文件"
+          echo "========================================"
 
-          echo "==== 固件文件 ===="
           ls -lah
 
           echo
-          echo "==== SHA256 ===="
+          echo "========================================"
+          echo "SHA256"
+          echo "========================================"
+
           if [ -f sha256sums ]; then
             cat sha256sums
           fi
 
-          # 保存最终 .config
+          # 保存最终配置
           cp "$OPENWRT_PATH/.config" build.config
 
-          # 获取 kernel 版本
-          KERNEL_VERSION="$(find . \
+          echo
+          echo "========================================"
+          echo "Factory / Sysupgrade 镜像"
+          echo "========================================"
+
+          find . \
+            -maxdepth 1 \
             -type f \
-            -name '*.manifest' \
-            -exec grep -h -oP '^kernel - \K.*?(?=~|-\d+-)' {} \; \
-            | head -n1 || true)"
+            \( \
+              -name '*factory*' \
+              -o \
+              -name '*sysupgrade*' \
+              -o \
+              -name '*.bin' \
+            \) \
+            -print
 
-          echo "VERSION_KERNEL=$KERNEL_VERSION" >> "$GITHUB_ENV"
-          echo "FIRMWARE_PATH=$PWD" >> "$GITHUB_ENV"
+          echo "FIRMWARE_PATH=$TARGET_DIR" >> "$GITHUB_ENV"
 
-      # --------------------------------------------------
-      # 14. Upload as artifact
-      # --------------------------------------------------
+      # ==================================================
+      # 14. 上传 GitHub Artifact
+      # ==================================================
       - name: Upload Firmware Artifact
         if: steps.compile.outputs.status == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: XG-040G-MD-25.12-${{ env.FILE_DATE }}
+
           path: |
             ${{ env.FIRMWARE_PATH }}/*
+
           if-no-files-found: error
+
           retention-days: 14
 
-      # --------------------------------------------------
-      # 15. Create GitHub Release
-      # --------------------------------------------------
+      # ==================================================
+      # 15. 创建 GitHub Release
+      # ==================================================
       - name: Upload Firmware To Release
         if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE == 'true'
         uses: ncipollo/release-action@v1
+
         with:
           name: ${{ env.RELEASE_TAG }}
+
           tag: ${{ env.RELEASE_TAG }}
+
           token: ${{ secrets.GITHUB_TOKEN }}
 
           artifacts: |
             ${{ env.FIRMWARE_PATH }}/*
 
           allowUpdates: true
+
           replacesArtifacts: true
 
           body: |
@@ -322,23 +526,33 @@ jobs:
             ## 固件信息
 
             - 设备：Nokia / Bell XG-040G-MD
-            - 平台：Airoha AN7581
-            - 分支：`${{ env.REPO_BRANCH }}`
-            - 固件源码：${{ env.REPO_URL }}
-            - 默认地址：`192.168.1.1`
+            - SoC：Airoha AN7581
+            - Target：airoha/an7581
+            - ImmortalWrt 分支：`${{ env.REPO_BRANCH }}`
+            - 默认管理地址：`192.168.1.1`
             - 默认用户：`root`
             - 默认密码：无
             - 编译时间：`${{ env.DATE }}`
-            - Kernel：`${{ env.VERSION_KERNEL }}`
 
-            ## 源码信息
+            ## 源码
+
+            `${{ env.REPO_URL }}`
+
+            ## Commit
 
             ${{ env.VERSION_INFO }}
 
-            ## 文件说明
+            ## 镜像
 
-            请优先确认生成的：
-            - `*.squashfs-factory.bin`
-            - `*.sysupgrade.bin`
+            请根据实际生成文件名选择对应镜像。
 
-            首次刷机请按照 XG-040G-MD 对应的 tcboot 刷机方式操作。
+            首次刷机前请确认 XG-040G-MD 当前 bootloader / tcboot
+            的刷机方式以及镜像类型。
+
+            不要仅根据文件名猜测 factory / sysupgrade 的用途。
+
+            ## 注意
+
+            本固件为 XG-040G-MD 专用构建。
+            刷机前请确认硬件型号完全一致。
+```
