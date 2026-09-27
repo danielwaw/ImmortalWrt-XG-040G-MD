@@ -1,4 +1,4 @@
-```yaml
+
 name: Build ImmortalWrt 25.12 for XG-040G-MD
 
 on:
