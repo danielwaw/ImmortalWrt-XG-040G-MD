@@ -1,4 +1,3 @@
-
 name: Build ImmortalWrt 25.12 for XG-040G-MD
 
 on:
@@ -555,4 +554,3 @@ jobs:
 
             本固件为 XG-040G-MD 专用构建。
             刷机前请确认硬件型号完全一致。
-```
