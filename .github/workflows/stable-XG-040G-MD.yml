@@ -1,4 +1,4 @@
-name: XGPON-XG-040G-MD
+name: XG-040G-MD
 
 on:
   workflow_dispatch:
@@ -146,27 +146,14 @@ jobs:
           fi
         done
 
-        - name: Load Custom Configuration(加载自定义配置)
+    - name: Load Custom Configuration(加载自定义配置)
       run: |
         SOURCE_CONFIG_PATH="$GITHUB_WORKSPACE/$CONFIG_FILE"
 
-        echo "=========================================="
-        echo "加载 XG-040G-MD 配置"
-        echo "=========================================="
-        echo "配置文件: $SOURCE_CONFIG_PATH"
-
-        if [ -f "$SOURCE_CONFIG_PATH" ]; then
-          echo "✅ 找到配置文件"
+        if [ -e "$SOURCE_CONFIG_PATH" ]; then
           cp "$SOURCE_CONFIG_PATH" "$OPENWRT_PATH/.config"
         else
-          echo "❌ ERROR: 找不到配置文件"
-          echo "检查路径:"
-          echo "$SOURCE_CONFIG_PATH"
-          echo
-          echo "当前仓库文件:"
-          find "$GITHUB_WORKSPACE" -maxdepth 3 -type f \
-            \( -name 'xg-040g-md.config' -o -name '*.config' \) \
-            -print
+          echo "ERROR: 找不到配置文件: $SOURCE_CONFIG_PATH"
           exit 1
         fi
 
@@ -176,46 +163,24 @@ jobs:
         echo "加入 xPON 软件包"
         echo "=========================================="
 
-        cat >> .config <<'EOF'
-
-# Airoha xPON
-CONFIG_PACKAGE_kmod-airoha-en7572=y
-CONFIG_PACKAGE_kmod-airoha-xpon=y
-CONFIG_PACKAGE_airoha-ponctl=y
-CONFIG_PACKAGE_airoha-pond=y
-CONFIG_PACKAGE_luci-app-pon=y
-
-EOF
-
-        echo "=========================================="
-        echo "执行 make defconfig"
-        echo "=========================================="
+        printf '\n# Airoha xPON\nCONFIG_PACKAGE_kmod-airoha-en7572=y\nCONFIG_PACKAGE_kmod-airoha-xpon=y\nCONFIG_PACKAGE_airoha-ponctl=y\nCONFIG_PACKAGE_airoha-pond=y\nCONFIG_PACKAGE_luci-app-pon=y\n' >> .config
 
         make defconfig
 
         echo "=========================================="
         echo "检查最终 xPON 配置"
         echo "=========================================="
-
-        grep -E \
-          'CONFIG_PACKAGE_(kmod-airoha-en7572|kmod-airoha-xpon|airoha-ponctl|airoha-pond|luci-app-pon)=' \
-          .config || true
+        grep -E 'CONFIG_PACKAGE_(kmod-airoha-en7572|kmod-airoha-xpon|airoha-ponctl|airoha-pond|luci-app-pon)=' .config || true
 
         echo "=========================================="
         echo "检查目标配置"
         echo "=========================================="
-
-        grep -E \
-          'CONFIG_TARGET_airoha|CONFIG_TARGET_DEVICE_|CONFIG_LINUX_' \
-          .config || true
+        grep -E 'CONFIG_TARGET_airoha|CONFIG_TARGET_DEVICE_|CONFIG_LINUX_' .config || true
 
         echo "=========================================="
         echo "检查 NPU"
         echo "=========================================="
-
-        grep -E \
-          'CONFIG_PACKAGE_airoha-npu|CONFIG_PACKAGE_luci-app-airoha-npu|CONFIG_PACKAGE_.*airoha.*npu' \
-          .config || echo "WARNING: NPU option missing!"
+        grep -E 'CONFIG_PACKAGE_airoha-npu|CONFIG_PACKAGE_luci-app-airoha-npu|CONFIG_PACKAGE_.*airoha.*npu' .config || echo "WARNING: NPU option missing!"
 
     - name: Download DL Package(下载DL软件包)
       run: |
@@ -253,19 +218,13 @@ EOF
         echo "=========================================="
 
         echo "----- xPON packages -----"
-        find bin/packages -type f -name '*.ipk' \( \
-          -iname '*en7572*.ipk' -o \
-          -iname '*xpon*.ipk' -o \
-          -iname '*ponctl*.ipk' -o \
-          -iname '*pond*.ipk' -o \
-          -iname '*luci-app-pon*.ipk' \
-        \) 2>/dev/null || true
+        find bin/packages -type f -name '*.ipk' -print 2>/dev/null | grep -Ei 'en7572|xpon|ponctl|pond|luci-app-pon' || true
 
         echo "----- 最终 CONFIG -----"
         grep -E 'CONFIG_PACKAGE_(kmod-airoha-en7572|kmod-airoha-xpon|airoha-ponctl|airoha-pond|luci-app-pon)=' .config || true
 
         echo "----- Manifest -----"
-        find bin/targets -type f -name '*.manifest' -exec grep -H -Ei 'en7572|xpon|ponctl|pond|luci-app-pon' {} \; || true
+        find bin/targets -type f -name '*.manifest' -print0 2>/dev/null | xargs -0 -r grep -H -Ei 'en7572|xpon|ponctl|pond|luci-app-pon' || true
 
     - name: Check Space Usage(检查空间使用情况)
       if: (!cancelled())
