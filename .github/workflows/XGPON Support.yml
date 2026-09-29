@@ -1,0 +1,212 @@
+name: XGPON2-XG-040G-MD (with XGPON Support)
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_branch:
+        description: '选择编译分支'
+        required: true
+        default: 'master-XG-040G-MD'
+        type: choice
+        options:
+          - master-XG-040G-MD
+          - openwrt-25.12-XG-040G-MD
+
+env:
+  REPO_URL: https://github.com/fzs209/immortalwrt.git
+  DEVICE_TARGET: airoha
+  DEVICE_SUBTARGET: an7581
+  CONFIG_FILE: config/xg-040g-md.config
+  CACHE_TOOLCHAIN: true
+  UPLOAD_BIN_DIR: false
+  FIRMWARE_RELEASE: true
+  TZ: Asia/Shanghai
+
+permissions:
+  contents: write
+
+jobs:
+  Build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check Server Performance(检查服务器性能)
+      run: |
+        echo "警告⚠"
+        echo "分配的服务器性能有限，若选择的插件过多，务必注意CPU性能！"
+        echo -e "已知CPU型号（降序）：7763，8370C，8272CL，8171M，E5-2673 \n"
+        echo "--------------------------CPU信息--------------------------"
+        echo "CPU物理数量：$(cat /proc/cpuinfo | grep "physical id" | sort | uniq | wc -l)"
+        echo -e "CPU核心信息：$(cat /proc/cpuinfo | grep name | cut -f2 -d: | uniq -c) \n"
+        echo "--------------------------内存信息--------------------------"
+        echo "已安装内存详细信息："
+        echo -e "$(sudo lshw -short -C memory | grep GiB) \n"
+        echo "--------------------------硬盘信息--------------------------"
+        echo "硬盘数量：$(ls /dev/sd* | grep -v [1-9] | wc -l)" && df -hT
+
+    - name: Initialization Environment(初始化环境)
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+        sudo -E apt -yqq install dos2unix libfuse-dev
+        sudo -E apt -yqq autoremove --purge
+        sudo -E apt -yqq autoclean
+        sudo -E apt -yqq clean
+        sudo -E systemctl daemon-reload
+        sudo timedatectl set-timezone "$TZ"
+
+    - name: Combine Disks(合并磁盘)
+      uses: easimon/maximize-build-space@v5
+      with:
+        swap-size-mb: 1024
+        temp-reserve-mb: 100
+        root-reserve-mb: 1024
+
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Clone Source Code(克隆源代码)
+      env:
+        REPO_BRANCH: ${{ github.event.inputs.repo_branch }}
+      run: |
+        df -hT $GITHUB_WORKSPACE
+        git clone "$REPO_URL" -b "$REPO_BRANCH" openwrt
+        cd openwrt
+        echo "OPENWRT_PATH=$PWD" >> $GITHUB_ENV
+        VERSION_INFO=$(git show -s --date=short --format="作者: %an<br/>时间: %cd<br/>内容: %s<br/>hash: %H")
+        echo "VERSION_INFO=$VERSION_INFO" >> $GITHUB_ENV
+        echo "REPO_BRANCH=$REPO_BRANCH" >> $GITHUB_ENV
+
+    - name: Generate Variables(生成变量)
+      run: |
+        SOURCE_REPO="$(echo $REPO_URL | awk -F '/' '{print $(NF)}')"
+        echo "SOURCE_REPO=$SOURCE_REPO" >> $GITHUB_ENV
+        echo "DEVICE_TARGET=$DEVICE_TARGET" >> $GITHUB_ENV
+        echo "DEVICE_SUBTARGET=$DEVICE_SUBTARGET" >> $GITHUB_ENV
+        echo "RELEASE_TAG=XG-040G-MD-XGPON-$(date +"%Y%m%d")-${{ github.run_number }}" >> $GITHUB_ENV
+
+    - name: Cache Toolchain(缓存工具链)
+      if: env.CACHE_TOOLCHAIN == 'true'
+      uses: HiGarfield/cachewrtbuild@main
+      with:
+        ccache: false
+        mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
+        prefix: ${{ env.OPENWRT_PATH }}
+
+    - name: Apply Patches & Extra Feeds(应用补丁与拓展源)
+      run: |
+        cd $OPENWRT_PATH
+        # 如果仓库根目录有对应分支的 patch 目录则应用补丁
+        if [ -d "$GITHUB_WORKSPACE/patch-${{ github.event.inputs.repo_branch }}" ]; then
+          cp -rf $GITHUB_WORKSPACE/patch-${{ github.event.inputs.repo_branch }}/* ./
+        elif [ -d "$GITHUB_WORKSPACE/patch-master" ]; then
+          cp -rf $GITHUB_WORKSPACE/patch-master/* ./
+        fi
+
+    - name: Install Feeds(安装feeds)
+      run: |
+        cd $OPENWRT_PATH
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Load & Inject XGPON Configuration(加载并注入XGPON与拨号配置)
+      run: |
+        cd $OPENWRT_PATH
+        [ -e $GITHUB_WORKSPACE/$CONFIG_FILE ] && cp $GITHUB_WORKSPACE/$CONFIG_FILE .config
+
+        # 1. 注入 Airoha NPU 与 PON 硬件加速/驱动支持
+        echo "CONFIG_PACKAGE_kmod-airoha-npu=y" >> .config
+        echo "CONFIG_PACKAGE_airoha-npu=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-airoha-npu=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-airoha-pon=y" >> .config
+        echo "CONFIG_PACKAGE_airoha-pon-firmware=y" >> .config
+
+        # 2. 注入 OMCI 管理与认证控制程序
+        echo "CONFIG_PACKAGE_omcid=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-pon=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-omcid=y" >> .config
+
+        # 3. 注入 PPPoE 拨号与网络协议栈工具
+        echo "CONFIG_PACKAGE_ppp=y" >> .config
+        echo "CONFIG_PACKAGE_ppp-mod-pppoe=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-pppoe=y" >> .config
+        echo "CONFIG_PACKAGE_luci-proto-ppp=y" >> .config
+        echo "CONFIG_PACKAGE_luci-proto-ipv6=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-ipt-offload=y" >> .config
+
+        make defconfig
+
+        echo "----------------- 检查 XGPON / NPU 关键编译配置 -----------------"
+        grep -E "CONFIG_PACKAGE_.*(airoha|npu|pon|omci|pppoe)" .config || true
+
+    - name: Download DL Package(下载DL软件包)
+      run: |
+        cd $OPENWRT_PATH
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile Firmware(开始编译固件)
+      id: compile
+      run: |
+        cd $OPENWRT_PATH
+        echo -e "$(nproc) thread compile"
+        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+        echo "DATE=$(date +"%Y-%m-%d %H:%M:%S")" >> $GITHUB_ENV
+        echo "FILE_DATE=$(date +"%Y.%m.%d")" >> $GITHUB_ENV
+
+    - name: Check Space Usage(检查空间使用情况)
+      if: (!cancelled())
+      run: df -hT
+
+    - name: Upload Bin Directory(上传固件)
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.SOURCE_REPO }}-bin-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.FILE_DATE }}
+        path: ${{ env.OPENWRT_PATH }}/bin
+
+    - name: Organize Files(整理文件)
+      if: steps.compile.outputs.status == 'success'
+      run: |
+        cd $OPENWRT_PATH/bin/targets/*/*
+        cat sha256sums
+        echo "VERSION_KERNEL=$(find -type f -name "*.manifest" -exec grep -oP '^kernel - \K.*?(?=~|-\d+-)' {} \;)" >> $GITHUB_ENV
+        cp $OPENWRT_PATH/.config build.config
+        mkdir -p packages
+        cp -f $OPENWRT_PATH/bin/packages/*/*/*.ipk packages/ 2>/dev/null || true
+        cp -f $OPENWRT_PATH/bin/packages/*/*/*.apk packages/ 2>/dev/null || true
+        tar -zcf Packages.tar.gz packages
+        rm -rf packages feeds.buildinfo version.buildinfo
+        echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+
+    - name: Upload Firmware To Artifact(将固件上传到Artifact)
+      if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE != 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.SOURCE_REPO }}-firmware-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE_PATH }}
+
+    - name: Upload Firmware To Release(发布固件)
+      if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE == 'true'
+      uses: ncipollo/release-action@v1
+      with:
+        name: ${{ env.RELEASE_TAG }}
+        tag: ${{ env.RELEASE_TAG }}
+        token: ${{ secrets.GITHUB_TOKEN }}
+        artifacts: ${{ env.FIRMWARE_PATH }}/*
+        body: |
+          **This is OpenWrt/ImmortalWrt Firmware for NOKIA BELL XG-040G-MD (with XGPON Support)**
+          ### 📒 固件信息
+          - 💡 功能特性：集成 Airoha AN7581 NPU 加速、XGPON 驱动、OMCID 认证服务与 PPPoE 拨号协议栈
+          - 💻 目标分支：${{ env.REPO_BRANCH }}
+          - ⚽ 固件源码: ${{ env.REPO_URL }}
+          - 🌐 默认管理地址: 192.168.1.1
+          - 🔑 默认密码: 无
+          - 📅 构建时间: ${{ env.DATE }}
+          ### 🧊 内核与源码版本
+          - 固件内核版本：${{ env.VERSION_KERNEL }}
+          - 最后提交信息：
+          ${{ env.VERSION_INFO }}
