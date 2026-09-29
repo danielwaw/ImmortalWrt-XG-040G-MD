@@ -14,12 +14,11 @@ on:
 
 env:
   REPO_URL: https://github.com/fzs209/immortalwrt.git
-  # REPO_BRANCH 将由 workflow_dispatch 输入动态设置
   DEVICE_TARGET: airoha
   DEVICE_SUBTARGET: an7581
   CONFIG_FILE: config/xg-040g-md.config
 
-  # Airoha xPON 新栈
+  # 当前 Airoha xPON feeds
   PON_DRIVERS_REPO: https://github.com/pbs05/openwrt-pon-drivers.git
   PON_USERSPACE_REPO: https://github.com/pbs05/openwrt-pon-userspace.git
 
@@ -101,25 +100,18 @@ jobs:
         mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-xpon
         prefix: ${{ env.OPENWRT_PATH }}
 
-    - name: Add xPON Feeds(加入xPON源码)
+    - name: Add xPON Feeds(加入xPON feeds)
       run: |
         cd "$OPENWRT_PATH"
 
         echo "=========================================="
-        echo "加入 Airoha xPON feeds"
+        echo "加入当前 xPON feeds"
         echo "=========================================="
 
-        if ! grep -q '^src-git pon_drivers ' feeds.conf.default; then
-          echo "src-git pon_drivers $PON_DRIVERS_REPO" >> feeds.conf.default
-        fi
+        echo "src-git pon_drivers $PON_DRIVERS_REPO" >> feeds.conf.default
+        echo "src-git pon_userspace $PON_USERSPACE_REPO" >> feeds.conf.default
 
-        if ! grep -q '^src-git pon_userspace ' feeds.conf.default; then
-          echo "src-git pon_userspace $PON_USERSPACE_REPO" >> feeds.conf.default
-        fi
-
-        echo
-        echo "当前 xPON feeds:"
-        grep -E '^src-git (pon_drivers|pon_userspace) ' feeds.conf.default || true
+        grep -E 'pon_drivers|pon_userspace' feeds.conf.default
 
     - name: Install Feeds(安装feeds)
       run: |
@@ -163,28 +155,38 @@ jobs:
         echo "加入 xPON 软件包"
         echo "=========================================="
 
-        printf '\n# Airoha xPON\nCONFIG_PACKAGE_kmod-airoha-en7572=y\nCONFIG_PACKAGE_kmod-airoha-xpon=y\nCONFIG_PACKAGE_airoha-ponctl=y\nCONFIG_PACKAGE_airoha-pond=y\nCONFIG_PACKAGE_luci-app-pon=y\n' >> .config
+        printf '%s\n' \
+          '# Airoha xPON' \
+          'CONFIG_PACKAGE_kmod-airoha-en7572=y' \
+          'CONFIG_PACKAGE_kmod-airoha-xpon=y' \
+          'CONFIG_PACKAGE_airoha-ponctl=y' \
+          'CONFIG_PACKAGE_airoha-pond=y' \
+          'CONFIG_PACKAGE_luci-app-pon=y' \
+          >> .config
 
         make defconfig
 
         echo "=========================================="
-        echo "检查最终 xPON 配置"
-        echo "=========================================="
-        grep -E 'CONFIG_PACKAGE_(kmod-airoha-en7572|kmod-airoha-xpon|airoha-ponctl|airoha-pond|luci-app-pon)=' .config || true
-
-        echo "=========================================="
         echo "检查目标配置"
         echo "=========================================="
+
         grep -E 'CONFIG_TARGET_airoha|CONFIG_TARGET_DEVICE_|CONFIG_LINUX_' .config || true
 
         echo "=========================================="
         echo "检查 NPU"
         echo "=========================================="
+
         grep -E 'CONFIG_PACKAGE_airoha-npu|CONFIG_PACKAGE_luci-app-airoha-npu|CONFIG_PACKAGE_.*airoha.*npu' .config || echo "WARNING: NPU option missing!"
+
+        echo "=========================================="
+        echo "检查 xPON"
+        echo "=========================================="
+
+        grep -E 'CONFIG_PACKAGE_(kmod-airoha-en7572|kmod-airoha-xpon|airoha-ponctl|airoha-pond|luci-app-pon)=' .config || true
 
     - name: Download DL Package(下载DL软件包)
       run: |
-        cd "$OPENWRT_PATH"
+        cd $OPENWRT_PATH
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
@@ -192,9 +194,8 @@ jobs:
     - name: Compile Firmware(开始编译固件)
       id: compile
       run: |
-        cd "$OPENWRT_PATH"
+        cd $OPENWRT_PATH
         echo -e "$(nproc) thread compile"
-
         if make -j$(nproc); then
           echo "status=success" >> $GITHUB_OUTPUT
         elif make -j1; then
@@ -204,7 +205,6 @@ jobs:
           echo "status=failure" >> $GITHUB_OUTPUT
           exit 1
         fi
-
         echo "DATE=$(date +"%Y-%m-%d %H:%M:%S")" >> $GITHUB_ENV
         echo "FILE_DATE=$(date +"%Y.%m.%d")" >> $GITHUB_ENV
 
@@ -217,14 +217,22 @@ jobs:
         echo "检查 xPON 编译结果"
         echo "=========================================="
 
-        echo "----- xPON packages -----"
         find bin/packages -type f -name '*.ipk' -print 2>/dev/null | grep -Ei 'en7572|xpon|ponctl|pond|luci-app-pon' || true
 
-        echo "----- 最终 CONFIG -----"
+        echo "=========================================="
+        echo "检查最终 CONFIG"
+        echo "=========================================="
+
         grep -E 'CONFIG_PACKAGE_(kmod-airoha-en7572|kmod-airoha-xpon|airoha-ponctl|airoha-pond|luci-app-pon)=' .config || true
 
-        echo "----- Manifest -----"
-        find bin/targets -type f -name '*.manifest' -print0 2>/dev/null | xargs -0 -r grep -H -Ei 'en7572|xpon|ponctl|pond|luci-app-pon' || true
+        echo "=========================================="
+        echo "检查 Manifest"
+        echo "=========================================="
+
+        find bin/targets -type f -name '*.manifest' -print 2>/dev/null | while read -r manifest; do
+          echo "--- $manifest ---"
+          grep -Ei 'en7572|xpon|ponctl|pond|luci-app-pon' "$manifest" || true
+        done
 
     - name: Check Space Usage(检查空间使用情况)
       if: (!cancelled())
@@ -276,17 +284,13 @@ jobs:
           - 🔑 默认密码: 无
           - 📅 构建时间: ${{ env.DATE }}
           ### 🟢 xPON
-          - 已加入 pbs05/openwrt-pon-drivers
-          - 已加入 pbs05/openwrt-pon-userspace
-          - kmod-airoha-en7572
-          - kmod-airoha-xpon
-          - airoha-ponctl
-          - airoha-pond
-          - luci-app-pon
-          ### ⚠️ 注意
-          - 本版本仅在现有 XG-040G-MD 配置基础上加入 xPON 软件包。
-          - 暂未修改 XG-040G-MD DTS、NAND/UBI 布局、BOSA/RI 数据和 Bootloader。
-          - PON 实机功能需要进一步验证。
+          - xPON feeds: pbs05/openwrt-pon-drivers
+          - xPON feeds: pbs05/openwrt-pon-userspace
+          - 已加入：kmod-airoha-en7572
+          - 已加入：kmod-airoha-xpon
+          - 已加入：airoha-ponctl
+          - 已加入：airoha-pond
+          - 已加入：luci-app-pon
           ### 🧊 固件版本
           - 固件内核版本：${{ env.VERSION_KERNEL }}
           - 固件编译前最后一次➦[主源码](${{ env.REPO_URL }})更新记录：
