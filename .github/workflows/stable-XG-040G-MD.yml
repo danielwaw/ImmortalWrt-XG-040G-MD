@@ -1,4 +1,4 @@
-name: XGPON-XG-040G-MD
+name: stable-XG-040G-MD
 
 on:
   workflow_dispatch:
@@ -18,13 +18,15 @@ env:
   DEVICE_SUBTARGET: an7581
   CONFIG_FILE: config/xg-040g-md.config
 
-  # 当前 Airoha xPON feeds
-  PON_DRIVERS_REPO: https://github.com/pbs05/openwrt-pon-drivers.git
-  PON_USERSPACE_REPO: https://github.com/pbs05/openwrt-pon-userspace.git
-
+  # 启用 OpenWrt 构建缓存
   CACHE_TOOLCHAIN: true
+
+  # 是否上传整个 bin 目录
   UPLOAD_BIN_DIR: false
+
+  # 是否创建 GitHub Release
   FIRMWARE_RELEASE: true
+
   TZ: Asia/Shanghai
 
 permissions:
@@ -35,33 +37,49 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+    # ============================================================
+    # 1. 检查 GitHub Runner
+    # ============================================================
     - name: Check Server Performance(检查服务器性能)
       run: |
-        echo "警告⚠"
-        echo "分配的服务器性能有限，若选择的插件过多，务必注意CPU性能！"
-        echo -e "已知CPU型号（降序）：7763，8370C，8272CL，8171M，E5-2673 \n"
-        echo "--------------------------CPU信息--------------------------"
-        echo "CPU物理数量：$(cat /proc/cpuinfo | grep \"physical id\" | sort | uniq | wc -l)"
-        echo -e "CPU核心信息：$(cat /proc/cpuinfo | grep name | cut -f2 -d: | uniq -c) \n"
-        echo "--------------------------内存信息--------------------------"
-        echo "已安装内存详细信息："
-        echo -e "$(sudo lshw -short -C memory | grep GiB) \n"
-        echo "--------------------------硬盘信息--------------------------"
-        echo "硬盘数量：$(ls /dev/sd* 2>/dev/null | grep -v [1-9] | wc -l)"
+        echo "========================================"
+        echo "GitHub Actions Runner 信息"
+        echo "========================================"
+
+        echo "CPU 核心数：$(nproc)"
+        echo "CPU 型号："
+        lscpu | grep -E 'Model name|Architecture|CPU\(s\)' || true
+
+        echo
+        echo "内存："
+        free -h
+
+        echo
+        echo "磁盘："
         df -hT
 
+    # ============================================================
+    # 2. 初始化编译环境
+    # ============================================================
     - name: Initialization Environment(初始化环境)
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
         sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+
         sudo -E apt -yqq install dos2unix libfuse-dev
+
         sudo -E apt -yqq autoremove --purge
         sudo -E apt -yqq autoclean
         sudo -E apt -yqq clean
+
         sudo -E systemctl daemon-reload
         sudo timedatectl set-timezone "$TZ"
 
+    # ============================================================
+    # 3. 最大化可用磁盘空间
+    # ============================================================
     - name: Combine Disks(合并磁盘)
       uses: easimon/maximize-build-space@v5
       with:
@@ -69,218 +87,422 @@ jobs:
         temp-reserve-mb: 100
         root-reserve-mb: 1024
 
+    # ============================================================
+    # 4. Checkout 当前仓库
+    # ============================================================
     - name: Checkout
       uses: actions/checkout@v4
 
+    # ============================================================
+    # 5. Clone ImmortalWrt 源码
+    # ============================================================
     - name: Clone Source Code(克隆源代码)
       env:
         REPO_BRANCH: ${{ github.event.inputs.repo_branch }}
       run: |
-        df -hT $GITHUB_WORKSPACE
-        git clone "$REPO_URL" -b "$REPO_BRANCH" openwrt
-        cd openwrt
-        echo "OPENWRT_PATH=$PWD" >> $GITHUB_ENV
-        VERSION_INFO=$(git show -s --date=short --format="作者: %an<br/>时间: %cd<br/>内容: %s<br/>hash: %H")
-        echo "VERSION_INFO=$VERSION_INFO" >> $GITHUB_ENV
-        echo "REPO_BRANCH=$REPO_BRANCH" >> $GITHUB_ENV
+        echo "========================================"
+        echo "克隆 ImmortalWrt"
+        echo "========================================"
 
+        echo "仓库：$REPO_URL"
+        echo "分支：$REPO_BRANCH"
+
+        git clone "$REPO_URL" -b "$REPO_BRANCH" openwrt
+
+        cd openwrt
+
+        echo "OPENWRT_PATH=$PWD" >> "$GITHUB_ENV"
+        echo "REPO_BRANCH=$REPO_BRANCH" >> "$GITHUB_ENV"
+
+        VERSION_INFO=$(git show -s --date=short \
+          --format="作者: %an<br/>时间: %cd<br/>内容: %s<br/>hash: %H")
+
+        echo "VERSION_INFO=$VERSION_INFO" >> "$GITHUB_ENV"
+
+        echo
+        echo "源码 Commit："
+        git rev-parse HEAD
+
+    # ============================================================
+    # 6. 生成变量
+    # ============================================================
     - name: Generate Variables(生成变量)
       run: |
-        SOURCE_REPO="$(echo $REPO_URL | awk -F '/' '{print $(NF)}')"
-        echo "SOURCE_REPO=$SOURCE_REPO" >> $GITHUB_ENV
-        echo "DEVICE_TARGET=$DEVICE_TARGET" >> $GITHUB_ENV
-        echo "DEVICE_SUBTARGET=$DEVICE_SUBTARGET" >> $GITHUB_ENV
-        echo "RELEASE_TAG=XG-040G-MD-xPON-$(date +"%Y%m%d")-${{ github.run_number }}" >> $GITHUB_ENV
+        SOURCE_REPO="$(basename "$REPO_URL" .git)"
 
-    - name: Cache Toolchain(缓存工具链)
+        echo "SOURCE_REPO=$SOURCE_REPO" >> "$GITHUB_ENV"
+        echo "DEVICE_TARGET=$DEVICE_TARGET" >> "$GITHUB_ENV"
+        echo "DEVICE_SUBTARGET=$DEVICE_SUBTARGET" >> "$GITHUB_ENV"
+
+        RELEASE_TAG="XG-040G-MD-$(date +'%Y%m%d')-${{ github.run_number }}"
+        echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+
+    # ============================================================
+    # 7. OpenWrt 构建缓存
+    #
+    # 这里保留原来的 cachewrtbuild。
+    #
+    # 作用：
+    # - 复用之前已经编译好的 toolchain
+    # - 复用 kernel/build_dir/staging_dir 中可以复用的内容
+    # - 本次新增 PON 包仍然需要第一次编译
+    # - ccache 仍关闭，避免额外占用大量空间
+    # ============================================================
+    - name: Cache Toolchain(缓存构建内容)
       if: env.CACHE_TOOLCHAIN == 'true'
       uses: HiGarfield/cachewrtbuild@main
       with:
         ccache: false
-        mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-xpon
+
+        # 保持与之前构建一致的 cache key，
+        # 尽量复用你之前已经成功编译的内容。
+        mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
+
         prefix: ${{ env.OPENWRT_PATH }}
 
-    - name: Add xPON Feeds(加入xPON feeds)
+    # ============================================================
+    # 8. 添加 PON Feeds
+    #
+    # 必须在 feeds update / install 之前添加。
+    # ============================================================
+    - name: Add PON Feeds(添加 PON 源)
       run: |
         cd "$OPENWRT_PATH"
 
-        echo "=========================================="
-        echo "加入当前 xPON feeds"
-        echo "=========================================="
+        echo "========================================"
+        echo "添加 Airoha PON Feeds"
+        echo "========================================"
 
-        echo "src-git pon_drivers $PON_DRIVERS_REPO" >> feeds.conf.default
-        echo "src-git pon_userspace $PON_USERSPACE_REPO" >> feeds.conf.default
+        grep -q '^src-git pon_drivers ' feeds.conf.default || \
+          echo "src-git pon_drivers https://github.com/pbs05/openwrt-pon-drivers.git" >> feeds.conf.default
 
-        grep -E 'pon_drivers|pon_userspace' feeds.conf.default
+        grep -q '^src-git pon_userspace ' feeds.conf.default || \
+          echo "src-git pon_userspace https://github.com/pbs05/openwrt-pon-userspace.git" >> feeds.conf.default
 
-    - name: Install Feeds(安装feeds)
+        echo
+        echo "当前 PON Feeds："
+        grep -E 'pon_drivers|pon_userspace' feeds.conf.default || true
+
+    # ============================================================
+    # 9. 更新 / 安装 Feeds
+    # ============================================================
+    - name: Install Feeds(安装 feeds)
       run: |
         cd "$OPENWRT_PATH"
+
+        echo "========================================"
+        echo "更新 Feeds"
+        echo "========================================"
+
         ./scripts/feeds update -a
+
+        echo
+        echo "========================================"
+        echo "安装 Feeds"
+        echo "========================================"
+
         ./scripts/feeds install -a
 
-        echo "=========================================="
-        echo "检查 xPON packages"
-        echo "=========================================="
-
-        for pkg in \
-          kmod-airoha-en7572 \
-          kmod-airoha-xpon \
-          airoha-ponctl \
-          airoha-pond \
-          luci-app-pon
-        do
-          if ./scripts/feeds search "$pkg" | grep -q "$pkg"; then
-            echo "OK: $pkg"
-          else
-            echo "ERROR: 未找到 xPON package: $pkg"
-            exit 1
-          fi
-        done
-
+    # ============================================================
+    # 10. 加载 XG-040G-MD 原始配置 + PON 配置
+    # ============================================================
     - name: Load Custom Configuration(加载自定义配置)
       run: |
+        echo "========================================"
+        echo "加载 XG-040G-MD 配置"
+        echo "========================================"
+
         SOURCE_CONFIG_PATH="$GITHUB_WORKSPACE/$CONFIG_FILE"
 
-        if [ -e "$SOURCE_CONFIG_PATH" ]; then
-          cp "$SOURCE_CONFIG_PATH" "$OPENWRT_PATH/.config"
-        else
-          echo "ERROR: 找不到配置文件: $SOURCE_CONFIG_PATH"
+        if [ ! -f "$SOURCE_CONFIG_PATH" ]; then
+          echo "ERROR: 找不到配置文件："
+          echo "$SOURCE_CONFIG_PATH"
           exit 1
         fi
 
+        echo "配置文件：$SOURCE_CONFIG_PATH"
+
+        cp "$SOURCE_CONFIG_PATH" "$OPENWRT_PATH/.config"
+
         cd "$OPENWRT_PATH"
 
-        echo "=========================================="
-        echo "加入 xPON 软件包"
-        echo "=========================================="
+        echo
+        echo "========================================"
+        echo "追加 PON 配置"
+        echo "========================================"
 
         printf '%s\n' \
-          '# Airoha xPON' \
           'CONFIG_PACKAGE_kmod-airoha-en7572=y' \
           'CONFIG_PACKAGE_kmod-airoha-xpon=y' \
           'CONFIG_PACKAGE_airoha-ponctl=y' \
           'CONFIG_PACKAGE_airoha-pond=y' \
           'CONFIG_PACKAGE_luci-app-pon=y' \
+          'CONFIG_PACKAGE_kmod-i2c-core=y' \
           >> .config
+
+        echo
+        echo "========================================"
+        echo "执行 make defconfig"
+        echo "========================================"
 
         make defconfig
 
-        echo "=========================================="
-        echo "检查目标配置"
-        echo "=========================================="
+        echo
+        echo "========================================"
+        echo "检查 AN7581 Target"
+        echo "========================================"
 
-        grep -E 'CONFIG_TARGET_airoha|CONFIG_TARGET_DEVICE_|CONFIG_LINUX_' .config || true
+        grep -E \
+          'CONFIG_TARGET_airoha|CONFIG_TARGET_DEVICE_|CONFIG_LINUX_' \
+          .config || true
 
-        echo "=========================================="
-        echo "检查 NPU"
-        echo "=========================================="
+        echo
+        echo "========================================"
+        echo "检查 Airoha NPU"
+        echo "========================================"
 
-        grep -E 'CONFIG_PACKAGE_airoha-npu|CONFIG_PACKAGE_luci-app-airoha-npu|CONFIG_PACKAGE_.*airoha.*npu' .config || echo "WARNING: NPU option missing!"
+        grep -E \
+          'CONFIG_PACKAGE_airoha-en7581-mt7996-npu-firmware|CONFIG_PACKAGE_kmod-airoha-npu|CONFIG_PACKAGE_luci-app-airoha-npu' \
+          .config || true
 
-        echo "=========================================="
-        echo "检查 xPON"
-        echo "=========================================="
+        echo
+        echo "========================================"
+        echo "检查 PON 配置"
+        echo "========================================"
 
-        grep -E 'CONFIG_PACKAGE_(kmod-airoha-en7572|kmod-airoha-xpon|airoha-ponctl|airoha-pond|luci-app-pon)=' .config || true
+        grep -E \
+          'CONFIG_PACKAGE_(kmod-airoha-en7572|kmod-airoha-xpon|airoha-ponctl|airoha-pond|luci-app-pon|kmod-i2c-core)=' \
+          .config || true
 
-    - name: Download DL Package(下载DL软件包)
+        echo
+        echo "========================================"
+        echo "检查关键配置是否正确"
+        echo "========================================"
+
+        if ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_bell_xg-040g-md=y$' .config; then
+          echo "ERROR: XG-040G-MD target 配置没有正确启用！"
+          exit 1
+        fi
+
+        if ! grep -q '^CONFIG_PACKAGE_kmod-airoha-en7572=y$' .config; then
+          echo "ERROR: kmod-airoha-en7572 没有启用！"
+          exit 1
+        fi
+
+        if ! grep -q '^CONFIG_PACKAGE_kmod-airoha-xpon=y$' .config; then
+          echo "ERROR: kmod-airoha-xpon 没有启用！"
+          exit 1
+        fi
+
+        if ! grep -q '^CONFIG_PACKAGE_kmod-i2c-core=y$' .config; then
+          echo "ERROR: kmod-i2c-core 没有启用！"
+          exit 1
+        fi
+
+        echo
+        echo "配置检查通过。"
+
+    # ============================================================
+    # 11. 下载源码包
+    # ============================================================
+    - name: Download DL Package(下载软件包)
       run: |
-        cd $OPENWRT_PATH
+        cd "$OPENWRT_PATH"
+
+        echo "========================================"
+        echo "下载源码包"
+        echo "========================================"
+
         make download -j8
+
+        echo
+        echo "检查异常小文件："
+
         find dl -size -1024c -exec ls -l {} \;
+
         find dl -size -1024c -exec rm -f {} \;
 
+    # ============================================================
+    # 12. 编译
+    #
+    # 正常：
+    #   make -j$(nproc)
+    #
+    # 如果失败：
+    #   首先针对 PON frontends 单独进行 V=s 编译
+    #
+    # 这样可以直接看到类似：
+    #   missing dependencies
+    #   missing kernel symbols
+    #   Makefile dependency
+    #   kernel API
+    # 等真正错误。
+    # ============================================================
     - name: Compile Firmware(开始编译固件)
       id: compile
       run: |
         cd "$OPENWRT_PATH"
 
-        echo "=========================================="
-        echo "开始多线程编译"
-        echo "=========================================="
+        THREADS="$(nproc)"
 
-        if make -j$(nproc); then
+        echo "========================================"
+        echo "开始编译 ImmortalWrt"
+        echo "========================================"
+        echo "线程数：$THREADS"
+        echo
+
+        if make -j"$THREADS"; then
+
+          echo
+          echo "========================================"
+          echo "多线程编译成功"
+          echo "========================================"
+
           echo "status=success" >> "$GITHUB_OUTPUT"
+
         else
-          echo "=========================================="
+
+          echo
+          echo "========================================"
           echo "多线程编译失败"
-          echo "=========================================="
+          echo "开始单独诊断 airoha-pon-frontends"
+          echo "========================================"
 
-          echo "=========================================="
-          echo "单独详细编译 airoha-pon-frontends"
-          echo "=========================================="
+          if make -j1 V=s \
+            package/feeds/pon_drivers/airoha-pon-frontends/compile; then
 
-          make -j1 V=s package/feeds/pon_drivers/airoha-pon-frontends/compile
+            echo
+            echo "========================================"
+            echo "airoha-pon-frontends 单独编译成功"
+            echo "继续单线程完整编译"
+            echo "========================================"
 
-          echo "=========================================="
-          echo "PON frontends 编译失败"
-          echo "=========================================="
+            if make -j1 V=s; then
 
-          exit 1
+              echo "status=success" >> "$GITHUB_OUTPUT"
+
+            else
+
+              echo
+              echo "========================================"
+              echo "完整编译仍然失败"
+              echo "========================================"
+
+              exit 1
+            fi
+
+          else
+
+            echo
+            echo "========================================"
+            echo "airoha-pon-frontends 编译失败"
+            echo "以上日志就是详细错误信息"
+            echo "========================================"
+
+            exit 1
+          fi
+
         fi
 
         echo "DATE=$(date +"%Y-%m-%d %H:%M:%S")" >> "$GITHUB_ENV"
         echo "FILE_DATE=$(date +"%Y.%m.%d")" >> "$GITHUB_ENV"
 
-    - name: Check xPON Build Result(检查xPON编译结果)
-      if: steps.compile.outputs.status == 'success'
-      run: |
-        cd "$OPENWRT_PATH"
-
-        echo "=========================================="
-        echo "检查 xPON 编译结果"
-        echo "=========================================="
-
-        find bin/packages -type f -name '*.ipk' -print 2>/dev/null | grep -Ei 'en7572|xpon|ponctl|pond|luci-app-pon' || true
-
-        echo "=========================================="
-        echo "检查最终 CONFIG"
-        echo "=========================================="
-
-        grep -E 'CONFIG_PACKAGE_(kmod-airoha-en7572|kmod-airoha-xpon|airoha-ponctl|airoha-pond|luci-app-pon)=' .config || true
-
-        echo "=========================================="
-        echo "检查 Manifest"
-        echo "=========================================="
-
-        find bin/targets -type f -name '*.manifest' -print 2>/dev/null | while read -r manifest; do
-          echo "--- $manifest ---"
-          grep -Ei 'en7572|xpon|ponctl|pond|luci-app-pon' "$manifest" || true
-        done
-
+    # ============================================================
+    # 13. 检查磁盘空间
+    # ============================================================
     - name: Check Space Usage(检查空间使用情况)
       if: (!cancelled())
-      run: df -hT
+      run: |
+        echo "========================================"
+        echo "磁盘空间"
+        echo "========================================"
+        df -hT
 
-    - name: Upload Bin Directory(上传固件)
+    # ============================================================
+    # 14. 上传整个 bin 目录
+    # ============================================================
+    - name: Upload Bin Directory(上传完整 bin)
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: ${{ env.SOURCE_REPO }}-bin-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.FILE_DATE }}
         path: ${{ env.OPENWRT_PATH }}/bin
+        retention-days: 14
 
-    - name: Organize Files(整理文件)
+    # ============================================================
+    # 15. 整理固件
+    # ============================================================
+    - name: Organize Files(整理固件)
       if: steps.compile.outputs.status == 'success'
       run: |
-        cd $OPENWRT_PATH/bin/targets/*/*
-        cat sha256sums
-        echo "VERSION_KERNEL=$(find -type f -name "*.manifest" -exec grep -oP '^kernel - \K.*?(?=~|-\d+-)' {} \;)" >> $GITHUB_ENV
-        cp $OPENWRT_PATH/.config build.config
-        mkdir -p packages
-        cp -f $OPENWRT_PATH/bin/packages/*/*/*.ipk packages/ 2>/dev/null || true
-        cp -f $OPENWRT_PATH/bin/packages/*/*/*.apk packages/ 2>/dev/null || true
-        tar -zcf Packages.tar.gz packages
-        rm -rf packages feeds.buildinfo version.buildinfo
-        echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+        cd "$OPENWRT_PATH/bin/targets/$DEVICE_TARGET/$DEVICE_SUBTARGET"
 
-    - name: Upload Firmware To Artifact(将固件上传到Artifact)
+        echo "========================================"
+        echo "固件文件"
+        echo "========================================"
+
+        ls -lah
+
+        echo
+        echo "========================================"
+        echo "SHA256"
+        echo "========================================"
+
+        if [ -f sha256sums ]; then
+          cat sha256sums
+        fi
+
+        echo
+        echo "========================================"
+        echo "Kernel 版本"
+        echo "========================================"
+
+        echo "VERSION_KERNEL=$(find . -type f -name "*.manifest" \
+          -exec grep -oP '^kernel - \K.*?(?=~|-\d+-)' {} \; \
+          | head -n1)" >> "$GITHUB_ENV"
+
+        cp "$OPENWRT_PATH/.config" build.config
+
+        # 收集编译出来的第三方包
+        mkdir -p packages
+
+        cp -f "$OPENWRT_PATH"/bin/packages/*/*/*.ipk \
+          packages/ 2>/dev/null || true
+
+        cp -f "$OPENWRT_PATH"/bin/packages/*/*/*.apk \
+          packages/ 2>/dev/null || true
+
+        if [ "$(find packages -type f | wc -l)" -gt 0 ]; then
+          tar -zcf Packages.tar.gz packages
+        else
+          echo "没有额外 packages，跳过 Packages.tar.gz"
+        fi
+
+        rm -rf packages feeds.buildinfo version.buildinfo
+
+        echo "FIRMWARE_PATH=$PWD" >> "$GITHUB_ENV"
+
+        echo
+        echo "========================================"
+        echo "最终固件"
+        echo "========================================"
+
+        ls -lah
+
+    # ============================================================
+    # 16. 上传 Artifact
+    # ============================================================
+    - name: Upload Firmware To Artifact(上传固件到 Artifact)
       if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE != 'true'
       uses: actions/upload-artifact@v4
       with:
         name: ${{ env.SOURCE_REPO }}-firmware-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE_PATH }}
+        retention-days: 14
 
+    # ============================================================
+    # 17. 创建 GitHub Release
+    # ============================================================
     - name: Upload Firmware To Release(发布固件)
       if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE == 'true'
       uses: ncipollo/release-action@v1
@@ -289,24 +511,52 @@ jobs:
         tag: ${{ env.RELEASE_TAG }}
         token: ${{ secrets.GITHUB_TOKEN }}
         artifacts: ${{ env.FIRMWARE_PATH }}/*
+        allowUpdates: true
+        replacesArtifacts: true
+
         body: |
-          **This is OpenWrt Firmware for XG-040G-MD**
-          ### 📒 固件信息(XG-040G-MD)
-          - 这是 XG-040G-MD 的专属构建
-          - 💻 目标分支：${{ env.REPO_BRANCH }}
-          - ⚽ 固件源码: ${{ env.REPO_URL }}
-          - 🌐 默认地址: 192.168.1.1
-          - 🔑 默认密码: 无
-          - 📅 构建时间: ${{ env.DATE }}
-          ### 🟢 xPON
-          - xPON feeds: pbs05/openwrt-pon-drivers
-          - xPON feeds: pbs05/openwrt-pon-userspace
-          - 已加入：kmod-airoha-en7572
-          - 已加入：kmod-airoha-xpon
-          - 已加入：airoha-ponctl
-          - 已加入：airoha-pond
-          - 已加入：luci-app-pon
-          ### 🧊 固件版本
-          - 固件内核版本：${{ env.VERSION_KERNEL }}
-          - 固件编译前最后一次➦[主源码](${{ env.REPO_URL }})更新记录：
+          # ImmortalWrt 25.12 - Nokia XG-040G-MD
+
+          ## 📒 固件信息
+
+          - 设备：Nokia / Bell XG-040G-MD
+          - SoC：Airoha AN7581
+          - Target：airoha
+          - Subtarget：an7581
+          - 设备 Profile：bell_xg-040g-md
+          - ImmortalWrt 分支：`${{ env.REPO_BRANCH }}`
+          - Kernel：`${{ env.VERSION_KERNEL }}`
+          - 默认地址：192.168.1.1
+          - 默认密码：无
+          - 编译时间：`${{ env.DATE }}`
+
+          ## 🔌 PON
+
+          本版本加入 Airoha PON 相关组件：
+
+          - kmod-airoha-en7572
+          - kmod-airoha-xpon
+          - airoha-ponctl
+          - airoha-pond
+          - luci-app-pon
+          - kmod-i2c-core
+
+          ## 🧠 Airoha NPU
+
+          保留 XG-040G-MD 原有：
+
+          - airoha-en7581-mt7996-npu-firmware
+          - kmod-airoha-npu
+          - luci-app-airoha-npu
+
+          ## 📦 源码
+
+          ${{ env.REPO_URL }}
+
           ${{ env.VERSION_INFO }}
+
+          ## ⚠️ 刷机提示
+
+          本固件针对 Nokia / Bell XG-040G-MD。
+
+          首次刷入前请确认当前 Bootloader / tcboot 所支持的镜像类型。
