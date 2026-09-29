@@ -194,19 +194,34 @@ jobs:
     - name: Compile Firmware(开始编译固件)
       id: compile
       run: |
-        cd $OPENWRT_PATH
-        echo -e "$(nproc) thread compile"
+        cd "$OPENWRT_PATH"
+
+        echo "=========================================="
+        echo "开始多线程编译"
+        echo "=========================================="
+
         if make -j$(nproc); then
-          echo "status=success" >> $GITHUB_OUTPUT
-        elif make -j1; then
-          echo "status=success" >> $GITHUB_OUTPUT
+          echo "status=success" >> "$GITHUB_OUTPUT"
         else
-          make -j1 V=s
-          echo "status=failure" >> $GITHUB_OUTPUT
+          echo "=========================================="
+          echo "多线程编译失败"
+          echo "=========================================="
+
+          echo "=========================================="
+          echo "单独详细编译 airoha-pon-frontends"
+          echo "=========================================="
+
+          make -j1 V=s package/feeds/pon_drivers/airoha-pon-frontends/compile
+
+          echo "=========================================="
+          echo "PON frontends 编译失败"
+          echo "=========================================="
+
           exit 1
         fi
-        echo "DATE=$(date +"%Y-%m-%d %H:%M:%S")" >> $GITHUB_ENV
-        echo "FILE_DATE=$(date +"%Y.%m.%d")" >> $GITHUB_ENV
+
+        echo "DATE=$(date +"%Y-%m-%d %H:%M:%S")" >> "$GITHUB_ENV"
+        echo "FILE_DATE=$(date +"%Y.%m.%d")" >> "$GITHUB_ENV"
 
     - name: Check xPON Build Result(检查xPON编译结果)
       if: steps.compile.outputs.status == 'success'
