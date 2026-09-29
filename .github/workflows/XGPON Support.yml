@@ -89,31 +89,36 @@ jobs:
         mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
         prefix: ${{ env.OPENWRT_PATH }}
 
-    - name: Integrate Airoha PON Driver & LuCI(真实整合PON驱动与UI源码)
+        - name: Integrate Airoha PON Driver & LuCI(整合PON驱动与UI文件)
       run: |
         cd $OPENWRT_PATH
 
-        # 1. 从 coolsnowwolf/lede 提取 airoha-pon 驱动源码包 (commit f7fd86e)
-        echo "--> 正在拉取 LEDE airoha-pon 驱动包..."
-        mkdir -p /tmp/lede-sparse
-        cd /tmp/lede-sparse
-        git init
-        git remote add origin https://github.com/coolsnowwolf/lede.git
-        git config core.sparseCheckout true
-        echo "package/kernel/airoha-pon" >> .git/info/sparse-checkout
-        git pull --depth 1 origin master
+        # 1. 精确获取 coolsnowwolf/lede 中的 airoha-pon 驱动包
+        echo "--> 正在获取 airoha-pon 驱动包..."
+        mkdir -p package/kernel/airoha-pon
+        curl -sL https://github.com/coolsnowwolf/lede/archive/f7fd86eaa58c29fed97da04ab219c74a835a9358.tar.gz | tar -xz --strip-components=3 -C package/kernel/airoha-pon lede-f7fd86eaa58c29fed97da04ab219c74a835a9358/package/kernel/airoha-pon
 
-        # 将 airoha-pon 复制到当前 openwrt 源码树中
-        cp -rf package/kernel/airoha-pon $OPENWRT_PATH/package/kernel/
-        rm -rf /tmp/lede-sparse
+        # 2. 拉取 naoki66/airoha-xpon-luci 并合并到 OpenWrt 的 files 覆盖目录
+        echo "--> 正在拉取 naoki66/airoha-xpon-luci 控制文件..."
+        mkdir -p /tmp/xpon-luci
+        git clone --depth 1 https://github.com/naoki66/airoha-xpon-luci.git /tmp/xpon-luci
 
-        # 2. 从 naoki66/airoha-xpon-luci 拉取 XGPON LuCI 面板与认证脚本
-        echo "--> 正在拉取 naoki66/airoha-xpon-luci 管理面板..."
-        git clone --depth 1 https://github.com/naoki66/airoha-xpon-luci.git $OPENWRT_PATH/package/custom/luci-app-airoha-xpon
+        # openwrt 根目录下的 files/ 会在构建 rootfs 时自动覆盖进系统 /
+        mkdir -p $OPENWRT_PATH/files
+        cp -rf /tmp/xpon-luci/etc $OPENWRT_PATH/files/ 2>/dev/null || true
+        cp -rf /tmp/xpon-luci/usr $OPENWRT_PATH/files/ 2>/dev/null || true
+        cp -rf /tmp/xpon-luci/www $OPENWRT_PATH/files/ 2>/dev/null || true
+        cp -rf /tmp/xpon-luci/lib $OPENWRT_PATH/files/ 2>/dev/null || true
+        chmod +x $OPENWRT_PATH/files/usr/bin/* 2>/dev/null || true
+        rm -rf /tmp/xpon-luci
 
-        # 3. 检查驱动与插件是否注入到位
-        ls -la $OPENWRT_PATH/package/kernel/airoha-pon
-        ls -la $OPENWRT_PATH/package/custom/luci-app-airoha-xpon
+        # 3. 校验驱动包是否存在
+        if [ ! -f "$OPENWRT_PATH/package/kernel/airoha-pon/Makefile" ]; then
+          echo "❌ 错误：airoha-pon 驱动包提取失败！"
+          exit 1
+        fi
+        echo "✅ airoha-pon 驱动与 LuCI 控制文件整合成功！"
+
 
     - name: Apply Local Patches(应用本地补丁)
       run: |
