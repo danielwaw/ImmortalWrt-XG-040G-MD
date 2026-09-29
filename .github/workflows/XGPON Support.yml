@@ -1,4 +1,4 @@
-name: XGPON2-XG-040G-MD (with XGPON Support)
+name: XG-040G-MD (with XGPON & LuCI)
 
 on:
   workflow_dispatch:
@@ -32,17 +32,13 @@ jobs:
     steps:
     - name: Check Server Performance(检查服务器性能)
       run: |
-        echo "警告⚠"
-        echo "分配的服务器性能有限，若选择的插件过多，务必注意CPU性能！"
-        echo -e "已知CPU型号（降序）：7763，8370C，8272CL，8171M，E5-2673 \n"
         echo "--------------------------CPU信息--------------------------"
         echo "CPU物理数量：$(cat /proc/cpuinfo | grep "physical id" | sort | uniq | wc -l)"
         echo -e "CPU核心信息：$(cat /proc/cpuinfo | grep name | cut -f2 -d: | uniq -c) \n"
         echo "--------------------------内存信息--------------------------"
-        echo "已安装内存详细信息："
         echo -e "$(sudo lshw -short -C memory | grep GiB) \n"
         echo "--------------------------硬盘信息--------------------------"
-        echo "硬盘数量：$(ls /dev/sd* | grep -v [1-9] | wc -l)" && df -hT
+        df -hT
 
     - name: Initialization Environment(初始化环境)
       env:
@@ -70,7 +66,6 @@ jobs:
       env:
         REPO_BRANCH: ${{ github.event.inputs.repo_branch }}
       run: |
-        df -hT $GITHUB_WORKSPACE
         git clone "$REPO_URL" -b "$REPO_BRANCH" openwrt
         cd openwrt
         echo "OPENWRT_PATH=$PWD" >> $GITHUB_ENV
@@ -94,10 +89,35 @@ jobs:
         mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
         prefix: ${{ env.OPENWRT_PATH }}
 
-    - name: Apply Patches & Extra Feeds(应用补丁与拓展源)
+    - name: Integrate Airoha PON Driver & LuCI(真实整合PON驱动与UI源码)
       run: |
         cd $OPENWRT_PATH
-        # 如果仓库根目录有对应分支的 patch 目录则应用补丁
+
+        # 1. 从 coolsnowwolf/lede 提取 airoha-pon 驱动源码包 (commit f7fd86e)
+        echo "--> 正在拉取 LEDE airoha-pon 驱动包..."
+        mkdir -p /tmp/lede-sparse
+        cd /tmp/lede-sparse
+        git init
+        git remote add origin https://github.com/coolsnowwolf/lede.git
+        git config core.sparseCheckout true
+        echo "package/kernel/airoha-pon" >> .git/info/sparse-checkout
+        git pull --depth 1 origin master
+
+        # 将 airoha-pon 复制到当前 openwrt 源码树中
+        cp -rf package/kernel/airoha-pon $OPENWRT_PATH/package/kernel/
+        rm -rf /tmp/lede-sparse
+
+        # 2. 从 naoki66/airoha-xpon-luci 拉取 XGPON LuCI 面板与认证脚本
+        echo "--> 正在拉取 naoki66/airoha-xpon-luci 管理面板..."
+        git clone --depth 1 https://github.com/naoki66/airoha-xpon-luci.git $OPENWRT_PATH/package/custom/luci-app-airoha-xpon
+
+        # 3. 检查驱动与插件是否注入到位
+        ls -la $OPENWRT_PATH/package/kernel/airoha-pon
+        ls -la $OPENWRT_PATH/package/custom/luci-app-airoha-xpon
+
+    - name: Apply Local Patches(应用本地补丁)
+      run: |
+        cd $OPENWRT_PATH
         if [ -d "$GITHUB_WORKSPACE/patch-${{ github.event.inputs.repo_branch }}" ]; then
           cp -rf $GITHUB_WORKSPACE/patch-${{ github.event.inputs.repo_branch }}/* ./
         elif [ -d "$GITHUB_WORKSPACE/patch-master" ]; then
@@ -110,35 +130,28 @@ jobs:
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Load & Inject XGPON Configuration(加载并注入XGPON与拨号配置)
+    - name: Load & Inject Configuration(加载配置并启用PON与PPPoE)
       run: |
         cd $OPENWRT_PATH
         [ -e $GITHUB_WORKSPACE/$CONFIG_FILE ] && cp $GITHUB_WORKSPACE/$CONFIG_FILE .config
 
-        # 1. 注入 Airoha NPU 与 PON 硬件加速/驱动支持
-        echo "CONFIG_PACKAGE_kmod-airoha-npu=y" >> .config
-        echo "CONFIG_PACKAGE_airoha-npu=y" >> .config
-        echo "CONFIG_PACKAGE_luci-app-airoha-npu=y" >> .config
+        # 启用 Airoha PON 内核驱动
         echo "CONFIG_PACKAGE_kmod-airoha-pon=y" >> .config
-        echo "CONFIG_PACKAGE_airoha-pon-firmware=y" >> .config
 
-        # 2. 注入 OMCI 管理与认证控制程序
-        echo "CONFIG_PACKAGE_omcid=y" >> .config
-        echo "CONFIG_PACKAGE_luci-app-pon=y" >> .config
-        echo "CONFIG_PACKAGE_luci-app-omcid=y" >> .config
+        # 启用 Airoha XPON LuCI 界面与控制工具
+        echo "CONFIG_PACKAGE_luci-app-airoha-xpon=y" >> .config
 
-        # 3. 注入 PPPoE 拨号与网络协议栈工具
+        # 启用 PPPoE 与宽带协议支持
         echo "CONFIG_PACKAGE_ppp=y" >> .config
         echo "CONFIG_PACKAGE_ppp-mod-pppoe=y" >> .config
         echo "CONFIG_PACKAGE_kmod-pppoe=y" >> .config
         echo "CONFIG_PACKAGE_luci-proto-ppp=y" >> .config
         echo "CONFIG_PACKAGE_luci-proto-ipv6=y" >> .config
-        echo "CONFIG_PACKAGE_kmod-ipt-offload=y" >> .config
 
         make defconfig
 
-        echo "----------------- 检查 XGPON / NPU 关键编译配置 -----------------"
-        grep -E "CONFIG_PACKAGE_.*(airoha|npu|pon|omci|pppoe)" .config || true
+        echo "----------------- 验证 PON / NPU 模块是否成功保留 -----------------"
+        grep -E "CONFIG_PACKAGE_.*(airoha|pon|xpon|pppoe)" .config || true
 
     - name: Download DL Package(下载DL软件包)
       run: |
@@ -198,15 +211,10 @@ jobs:
         token: ${{ secrets.GITHUB_TOKEN }}
         artifacts: ${{ env.FIRMWARE_PATH }}/*
         body: |
-          **This is OpenWrt/ImmortalWrt Firmware for NOKIA BELL XG-040G-MD (with XGPON Support)**
-          ### 📒 固件信息
-          - 💡 功能特性：集成 Airoha AN7581 NPU 加速、XGPON 驱动、OMCID 认证服务与 PPPoE 拨号协议栈
-          - 💻 目标分支：${{ env.REPO_BRANCH }}
-          - ⚽ 固件源码: ${{ env.REPO_URL }}
-          - 🌐 默认管理地址: 192.168.1.1
-          - 🔑 默认密码: 无
-          - 📅 构建时间: ${{ env.DATE }}
-          ### 🧊 内核与源码版本
-          - 固件内核版本：${{ env.VERSION_KERNEL }}
-          - 最后提交信息：
-          ${{ env.VERSION_INFO }}
+          **This is OpenWrt Firmware for NOKIA BELL XG-040G-MD with Native XG-PON & LuCI Support**
+          ### 📒 固件亮点
+          - 🔌 **集成 Airoha 原生 PON 驱动：** 支持 AN7581 / EN7581 XG-PON / GPON 物理层与 MAC
+          - 🖥️ **集成 XG-PON LuCI 控制面板：** 支持在 Web 界面配置 LOID、GPON SN、Password 及 O5 状态监控
+          - ⚡ **AN7581 NPU 硬件转发加速**
+          - 🌐 **默认管理地址：** 192.168.1.1（无密码）
+          - 📅 **构建时间：** ${{ env.DATE }}
