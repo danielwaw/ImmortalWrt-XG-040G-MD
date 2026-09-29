@@ -89,7 +89,7 @@ jobs:
         mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
         prefix: ${{ env.OPENWRT_PATH }}
 
-        - name: Integrate Airoha PON Driver & LuCI(整合PON驱动与UI文件)
+    - name: Integrate Airoha PON Driver & LuCI(整合PON驱动与UI文件)
       run: |
         cd $OPENWRT_PATH
 
