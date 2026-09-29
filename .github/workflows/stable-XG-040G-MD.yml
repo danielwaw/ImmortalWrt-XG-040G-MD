@@ -1,4 +1,4 @@
-name: XG-040G-MD
+name: XGPON-XG-040G-MD
 
 on:
   workflow_dispatch:
