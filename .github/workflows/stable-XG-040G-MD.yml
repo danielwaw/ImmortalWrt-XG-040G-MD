@@ -251,29 +251,29 @@ jobs:
         echo "检查 Linux I2C 配置"
         echo "========================================"
 
-echo "--- CONFIG_I2C ---"
-grep -E '^CONFIG_I2C(=|_)' .config || true
+        echo "--- CONFIG_I2C ---"
+        grep -E '^CONFIG_I2C(=|_)' .config || true
 
-echo
-echo "--- I2C package ---"
-grep -E '^CONFIG_PACKAGE_kmod-i2c' .config || true
+        echo
+        echo "--- I2C package ---"
+        grep -E '^CONFIG_PACKAGE_kmod-i2c' .config || true
 
-echo
-echo "--- AN7581 I2C ---"
-grep -E '^CONFIG_PACKAGE_kmod-i2c-an7581=' .config || true
+        echo
+        echo "--- AN7581 I2C ---"
+        grep -E '^CONFIG_PACKAGE_kmod-i2c-an7581=' .config || true
 
-echo
-echo "========================================"
-echo "检查实际生成的 I2C 内核模块"
-echo "========================================"
+        echo
+        echo "========================================"
+        echo "检查实际生成的 I2C 内核模块"
+        echo "========================================"
 
-find "$OPENWRT_PATH/build_dir" \
-  \( \
-    -name 'i2c-core.ko' \
-    -o -name 'i2c-dev.ko' \
-    -o -name 'i2c-mt7621.ko' \
-  \) \
-  -print 2>/dev/null || true
+        find "$OPENWRT_PATH/build_dir" \
+        \( \
+        -name 'i2c-core.ko' \
+        -o -name 'i2c-dev.ko' \
+        -o -name 'i2c-mt7621.ko' \
+        \) \
+        -print 2>/dev/null || true
 
         echo
         echo "========================================"
