@@ -121,9 +121,7 @@ jobs:
 
         echo
         echo "源码 Commit："
-        OPENWRT_COMMIT="$(git rev-parse HEAD)"
-        echo "$OPENWRT_COMMIT"
-        echo "OPENWRT_COMMIT=$OPENWRT_COMMIT" >> "$GITHUB_ENV"
+        git rev-parse HEAD
 
     # ============================================================
     # 6. 生成变量
@@ -206,47 +204,118 @@ jobs:
         ./scripts/feeds install -a
 
     # ============================================================
-    # 10. 准备 DL 缓存 Key
+    # 10. 缓存 OpenWrt DL 源码包
     #
-    # build cache 与 dl 缓存分开：
-    # - cachewrtbuild 复用 build_dir/staging_dir/toolchain
-    # - actions/cache 复用已经下载的源码压缩包
-    #
-    # PON feed commit 变化时，会生成新的 DL cache；
-    # restore-keys 仍会先恢复同一分支的旧缓存。
-    # ============================================================
-    - name: Prepare DL Cache Key(准备源码下载缓存)
-      run: |
-        cd "$OPENWRT_PATH"
-
-        mkdir -p "$OPENWRT_PATH/dl"
-
-        PON_DRIVERS_COMMIT="$(git -C feeds/pon_drivers rev-parse HEAD)"
-        PON_USERSPACE_COMMIT="$(git -C feeds/pon_userspace rev-parse HEAD)"
-
-        PON_FEEDS_KEY="${PON_DRIVERS_COMMIT}-${PON_USERSPACE_COMMIT}"
-
-        echo "PON_DRIVERS_COMMIT=$PON_DRIVERS_COMMIT" >> "$GITHUB_ENV"
-        echo "PON_USERSPACE_COMMIT=$PON_USERSPACE_COMMIT" >> "$GITHUB_ENV"
-        echo "PON_FEEDS_KEY=$PON_FEEDS_KEY" >> "$GITHUB_ENV"
-
-        echo "Source commit      : $OPENWRT_COMMIT"
-        echo "PON drivers commit : $PON_DRIVERS_COMMIT"
-        echo "PON userspace commit: $PON_USERSPACE_COMMIT"
-
-    # ============================================================
-    # 11. 缓存 OpenWrt DL 源码包
+    # cachewrtbuild 负责 build_dir/staging_dir/toolchain；
+    # actions/cache 额外缓存 dl，避免每次重复下载源码包。
     # ============================================================
     - name: Cache DL Sources(缓存下载源码)
       uses: actions/cache@v4
       with:
         path: ${{ env.OPENWRT_PATH }}/dl
-        key: ${{ runner.os }}-openwrt-dl-${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.OPENWRT_COMMIT }}-${{ env.PON_FEEDS_KEY }}
+        key: ${{ runner.os }}-openwrt-dl-${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.OPENWRT_COMMIT }}
         restore-keys: |
           ${{ runner.os }}-openwrt-dl-${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-
 
     # ============================================================
-    # 12. 加载 XG-040G-MD 原始配置 + PON 配置
+    # 10.5. 修补 EN7572 的 I2C 包依赖
+    #
+    # en7572.ko 实际引用 i2c-core.ko。
+    # OpenWrt 25.12 的包依赖检查要求消费者 package
+    # 显式声明 +kmod-i2c-core。
+    # ============================================================
+    - name: Patch EN7572 I2C Dependency(修补 EN7572 I2C 依赖)
+      run: |
+        cd "$OPENWRT_PATH"
+
+        echo "========================================"
+        echo "定位 EN7572 package Makefile"
+        echo "========================================"
+
+        EN7572_MK="$(grep -R -l -E 'en7572|kmod-airoha-en7572' \
+          feeds/pon_drivers/airoha-pon-frontends \
+          --include='Makefile' 2>/dev/null | head -n1)"
+
+        if [ -z "$EN7572_MK" ]; then
+          echo "ERROR: 找不到 EN7572 package Makefile"
+          exit 1
+        fi
+
+        echo "EN7572 Makefile: $EN7572_MK"
+
+        python3 - "$EN7572_MK" <<'PYTHON'
+        import re
+        import sys
+        from pathlib import Path
+
+        path = Path(sys.argv[1])
+        lines = path.read_text(errors="ignore").splitlines(True)
+        out = []
+        matched = False
+        patched = False
+        i = 0
+
+        while i < len(lines):
+            line = lines[i]
+            m = re.match(r'^define\s+KernelPackage/(\S+)\s*$', line.rstrip('\n'))
+
+            if not m:
+                out.append(line)
+                i += 1
+                continue
+
+            block = [line]
+            j = i + 1
+            while j < len(lines):
+                block.append(lines[j])
+                if lines[j].strip() == 'endef':
+                    j += 1
+                    break
+                j += 1
+
+            block_text = ''.join(block).lower()
+            if 'en7572' not in block_text and 'kmod-airoha-en7572' not in block_text:
+                out.extend(block)
+                i = j
+                continue
+
+            matched = True
+
+            # Do not touch it if the dependency is already present.
+            if '+kmod-i2c-core' not in block_text:
+                # GNU make '+=' preserves any existing DEPENDS definition.
+                block.insert(len(block) - 1, '  DEPENDS+=+kmod-i2c-core\n')
+                patched = True
+
+            out.extend(block)
+            i = j
+
+        if not matched:
+            raise SystemExit('ERROR: 没有找到 EN7572 KernelPackage 定义')
+
+        path.write_text(''.join(out))
+        print(f'EN7572 package matched; dependency patched={patched}')
+        PYTHON
+
+        echo
+        echo "========================================"
+        echo "确认 EN7572 -> kmod-i2c-core"
+        echo "========================================"
+
+        grep -R -n -A25 -B5 -E 'define KernelPackage/.*en7572' \
+          feeds/pon_drivers/airoha-pon-frontends \
+          --include='Makefile' 2>/dev/null || true
+
+        if ! grep -R -q -E '^[[:space:]]*DEPENDS[^=]*=[^[:space:]]*.*\+kmod-i2c-core|^[[:space:]]*DEPENDS\+=\+kmod-i2c-core' \
+            feeds/pon_drivers/airoha-pon-frontends --include='Makefile' 2>/dev/null; then
+          echo "ERROR: EN7572 package 没有找到 kmod-i2c-core 依赖"
+          exit 1
+        fi
+
+        echo "EN7572 -> kmod-i2c-core: OK"
+
+    # ============================================================
+    # 11. 加载 XG-040G-MD 原始配置 + PON 配置
     # ============================================================
     - name: Load Custom Configuration(加载自定义配置)
       run: |
@@ -280,8 +349,7 @@ jobs:
           'CONFIG_PACKAGE_airoha-pond=y' \
           'CONFIG_PACKAGE_luci-app-pon=y' \
           'CONFIG_PACKAGE_kmod-i2c-an7581=y' \
-          'CONFIG_I2C=m' \
-          'CONFIG_I2C_MT7621=m' \
+          'CONFIG_PACKAGE_kmod-i2c-core=y' \
           >> .config
 
         echo
@@ -295,25 +363,30 @@ jobs:
         echo "检查 Linux I2C 配置"
         echo "========================================"
 
-        echo "--- CONFIG_I2C ---"
-        grep -E '^CONFIG_I2C(=|_)' .config || true
-
-        echo
-        echo "--- I2C package ---"
-        grep -E '^CONFIG_PACKAGE_kmod-i2c' .config || true
-
-        echo
-        echo "--- AN7581 I2C package ---"
-        grep -E '^CONFIG_PACKAGE_kmod-i2c-an7581=' .config || true
-
-        echo
-        echo "--- I2C kernel modules expected by AN7581 ---"
+        echo "--- Kernel I2C symbols (diagnostic only) ---"
         grep -E '^CONFIG_I2C=' .config || true
         grep -E '^CONFIG_I2C_MT7621=' .config || true
 
         echo
-        echo "--- I2C core package pulled by dependency ---"
-        grep -E '^CONFIG_PACKAGE_kmod-i2c-core=' .config || true
+        echo "--- I2C packages ---"
+        grep -E '^CONFIG_PACKAGE_kmod-i2c(-an7581|-core)=' .config || true
+
+        echo
+        echo "注意：CONFIG_I2C/CONFIG_I2C_MT7621 不在这里强制设置为 m，
+        它们由对应 KernelPackage 的 KCONFIG 管理。"
+
+        echo
+        echo "========================================"
+        echo "检查实际生成的 I2C 内核模块"
+        echo "========================================"
+
+        find "$OPENWRT_PATH/build_dir" \
+        \( \
+        -name 'i2c-core.ko' \
+        -o -name 'i2c-dev.ko' \
+        -o -name 'i2c-mt7621.ko' \
+        \) \
+        -print 2>/dev/null || true
 
         echo
         echo "========================================"
@@ -362,23 +435,8 @@ jobs:
           exit 1
         fi
 
-        if ! grep -q '^CONFIG_PACKAGE_kmod-i2c-an7581=y$' .config; then
-          echo "ERROR: kmod-i2c-an7581 没有启用！"
-          exit 1
-        fi
-
-        if ! grep -q '^CONFIG_I2C=m$' .config; then
-          echo "ERROR: CONFIG_I2C 不是 m，无法生成 i2c-core.ko！"
-          exit 1
-        fi
-
-        if ! grep -q '^CONFIG_I2C_MT7621=m$' .config; then
-          echo "ERROR: CONFIG_I2C_MT7621 不是 m，无法生成 i2c-mt7621.ko！"
-          exit 1
-        fi
-
         if ! grep -q '^CONFIG_PACKAGE_kmod-i2c-core=y$' .config; then
-          echo "ERROR: kmod-i2c-core 没有被 kmod-i2c-an7581 自动拉入！"
+          echo "ERROR: kmod-i2c-core 没有启用！"
           exit 1
         fi
 
@@ -386,7 +444,7 @@ jobs:
         echo "配置检查通过。"
 
     # ============================================================
-    # 13. 下载源码包
+    # 12. 下载源码包
     # ============================================================
     - name: Download DL Package(下载软件包)
       run: |
@@ -406,7 +464,7 @@ jobs:
         find dl -size -1024c -exec rm -f {} \;
 
     # ============================================================
-    # 14. 编译
+    # 13. 编译
     #
     # 正常：
     #   make -j$(nproc)
@@ -491,7 +549,7 @@ jobs:
         echo "FILE_DATE=$(date +"%Y.%m.%d")" >> "$GITHUB_ENV"
 
     # ============================================================
-    # 15. 检查磁盘空间
+    # 14. 检查磁盘空间
     # ============================================================
     - name: Check Space Usage(检查空间使用情况)
       if: (!cancelled())
@@ -502,7 +560,7 @@ jobs:
         df -hT
 
     # ============================================================
-    # 16. 上传整个 bin 目录
+    # 15. 上传整个 bin 目录
     # ============================================================
     - name: Upload Bin Directory(上传完整 bin)
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
@@ -513,7 +571,7 @@ jobs:
         retention-days: 14
 
     # ============================================================
-    # 17. 整理固件
+    # 16. 整理固件
     # ============================================================
     - name: Organize Files(整理固件)
       if: steps.compile.outputs.status == 'success'
@@ -573,7 +631,7 @@ jobs:
         ls -lah
 
     # ============================================================
-    # 18. 上传 Artifact
+    # 17. 上传 Artifact
     # ============================================================
     - name: Upload Firmware To Artifact(上传固件到 Artifact)
       if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE != 'true'
@@ -584,7 +642,7 @@ jobs:
         retention-days: 14
 
     # ============================================================
-    # 19. 创建 GitHub Release
+    # 18. 创建 GitHub Release
     # ============================================================
     - name: Upload Firmware To Release(发布固件)
       if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE == 'true'
@@ -622,7 +680,7 @@ jobs:
           - airoha-ponctl
           - airoha-pond
           - luci-app-pon
-          - kmod-i2c-an7581（自动依赖 kmod-i2c-core）
+          - kmod-i2c-an7581（依赖 kmod-i2c-core）
 
           ## 🧠 Airoha NPU
 
