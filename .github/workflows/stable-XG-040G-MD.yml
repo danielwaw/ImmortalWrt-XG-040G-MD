@@ -248,8 +248,8 @@ jobs:
         make defconfig
 
         echo "========================================"
-echo "检查 Linux I2C 配置"
-echo "========================================"
+        echo "检查 Linux I2C 配置"
+        echo "========================================"
 
 echo "--- CONFIG_I2C ---"
 grep -E '^CONFIG_I2C(=|_)' .config || true
