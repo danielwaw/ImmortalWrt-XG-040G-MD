@@ -222,12 +222,15 @@ jobs:
     # ============================================================
     # 10.5. 修补 EN7572 的 I2C 包依赖
     #
-    # 这里不再用“第一个 endef”判断 package block。
-    # Makefile 允许 define/endef 嵌套，因此必须按 define 层级解析，
-    # 否则会把 DEPENDS 插到 KernelPackage 外面，导致：
-    #   recipe commences before first target
+    # 当前 PON feed 的实际 Makefile 已确认：
+    #   define KernelPackage/airoha-en7572
+    #   define KernelPackage/airoha-en7572/description
+    #   define KernelPackage/airoha-en7572/install
     #
-    # 只修改真正匹配 EN7572 的 KernelPackage，并且要求最终只找到一个。
+    # 后两者不是 KernelPackage 本体，不能用“包含 en7572 的 define”匹配。
+    # 这里严格匹配唯一的：
+    #   define KernelPackage/airoha-en7572
+    # 只修改这个 block。
     # ============================================================
     - name: Patch EN7572 I2C Dependency(修补 EN7572 I2C 依赖)
       run: |
@@ -238,110 +241,92 @@ jobs:
         echo "========================================"
 
         python3 <<'PYTHON'
-        import re
         from pathlib import Path
 
-        root = Path("feeds/pon_drivers/airoha-pon-frontends")
-        if not root.is_dir():
-            raise SystemExit(f"ERROR: PON feed 不存在: {root}")
+        path = Path("feeds/pon_drivers/airoha-pon-frontends/Makefile")
+        if not path.is_file():
+            raise SystemExit(f"ERROR: 找不到 EN7572 package Makefile: {path}")
 
-        makefiles = sorted(root.rglob("Makefile"))
-        if not makefiles:
-            raise SystemExit("ERROR: PON feed 中没有找到 Makefile")
+        lines = path.read_text(errors="ignore").splitlines(True)
+        header = "define KernelPackage/airoha-en7572"
 
-        define_re = re.compile(r"^\s*define\s+(.+?)\s*$", re.I)
-        endef_re = re.compile(r"^\s*endef\s*$", re.I)
-        kernelpkg_re = re.compile(r"^KernelPackage/", re.I)
-
-        matches = []
-
-        for path in makefiles:
-            lines = path.read_text(errors="ignore").splitlines(True)
-            i = 0
-            while i < len(lines):
-                m = define_re.match(lines[i].rstrip("\n"))
-                if not m:
-                    i += 1
-                    continue
-
-                name = m.group(1).strip()
-                if not kernelpkg_re.match(name):
-                    i += 1
-                    continue
-
-                depth = 1
-                j = i + 1
-                while j < len(lines) and depth:
-                    if define_re.match(lines[j].rstrip("\n")):
-                        depth += 1
-                    elif endef_re.match(lines[j].rstrip("\n")):
-                        depth -= 1
-                    j += 1
-
-                if depth != 0:
-                    raise SystemExit(
-                        f"ERROR: {path}:{i+1} 的 {name} 没有找到匹配的 endef"
-                    )
-
-                block = lines[i:j]
-                block_text = "".join(block)
-                low = block_text.lower()
-
-                # 匹配 package 名、FILES、TITLE 等任意位置出现的 EN7572 标识。
-                if not (
-                    "en7572" in name.lower()
-                    or "kmod-airoha-en7572" in low
-                    or "en7572.ko" in low
-                ):
-                    i = j
-                    continue
-
-                matches.append((path, i, j, name, block))
-                i = j
+        # 只允许一个真正的 EN7572 KernelPackage 本体。
+        # description/install 是 KernelPackage 的附属 define，不算匹配。
+        matches = [
+            i for i, line in enumerate(lines)
+            if line.strip() == header
+        ]
 
         if len(matches) != 1:
-            print(f"ERROR: EN7572 KernelPackage 匹配数量 = {len(matches)}，拒绝盲改。")
-            if matches:
-                for path, i, j, name, block in matches:
-                    print(f"  MATCH: {path}:{i+1}-{j} -> {name}")
-            print("\n当前 feed 中所有 KernelPackage：")
-            for path in makefiles:
-                lines = path.read_text(errors="ignore").splitlines(True)
-                for lineno, line in enumerate(lines, 1):
-                    m = define_re.match(line.rstrip("\n"))
-                    if m and kernelpkg_re.match(m.group(1).strip()):
-                        print(f"  {path}:{lineno}: {m.group(1).strip()}")
+            print(f"ERROR: EN7572 KernelPackage 本体匹配数量 = {len(matches)}，拒绝盲改。")
+            for i, line in enumerate(lines, 1):
+                if "KernelPackage/airoha-en7572" in line:
+                    print(f"  {path}:{i}: {line.rstrip()}")
             raise SystemExit(1)
 
-        path, i, j, name, block = matches[0]
+        start = matches[0]
+        end = None
+        for i in range(start + 1, len(lines)):
+            if lines[i].strip() == "endef":
+                end = i
+                break
+
+        if end is None:
+            raise SystemExit("ERROR: EN7572 KernelPackage 找不到对应 endef")
+
+        block = lines[start:end + 1]
         block_text = "".join(block)
 
+        print(f"EN7572 package block: {path}:{start + 1}-{end + 1}")
+        print("--- 原始 EN7572 block ---")
+        print(block_text, end="")
+        print("--- 结束 ---")
+
         if "+kmod-i2c-core" in block_text:
-            print(f"EN7572 package 已经包含 +kmod-i2c-core: {path}:{i+1} -> {name}")
+            print("EN7572 已经包含 +kmod-i2c-core，无需修改。")
         else:
-            # 不改动现有 DEPENDS 行，直接在 KernelPackage define 后追加
-            # 一条独立 DEPENDS+=，避免破坏多行续行语法。
-            block.insert(1, "  DEPENDS+=+kmod-i2c-core\n")
-
-            lines = path.read_text(errors="ignore").splitlines(True)
-            lines[i:j] = block
+            # 在 EN7572 本体的 endef 前追加依赖。
+            # 放在 block 最后，确保不会被后面的 DEPENDS:= 覆盖。
+            lines.insert(end, "  DEPENDS+=+kmod-i2c-core\n")
             path.write_text("".join(lines))
-            print(f"已修补: {path}:{i+1} -> {name}")
+            print("已添加：DEPENDS+=+kmod-i2c-core")
 
-        print("EN7572 KernelPackage 定位唯一，修改完成。")
+        # 修改后再次确认：只存在一个本体，且依赖位于该 block 内。
+        lines2 = path.read_text(errors="ignore").splitlines(True)
+        matches2 = [i for i, line in enumerate(lines2) if line.strip() == header]
+        if len(matches2) != 1:
+            raise SystemExit(f"ERROR: 修改后 EN7572 KernelPackage 本体数量异常: {len(matches2)}")
+
+        start2 = matches2[0]
+        end2 = None
+        for i in range(start2 + 1, len(lines2)):
+            if lines2[i].strip() == "endef":
+                end2 = i
+                break
+        if end2 is None:
+            raise SystemExit("ERROR: 修改后 EN7572 KernelPackage 找不到 endef")
+
+        final_block = "".join(lines2[start2:end2 + 1])
+        if "+kmod-i2c-core" not in final_block:
+            raise SystemExit("ERROR: EN7572 block 中仍未找到 +kmod-i2c-core")
+
+        print("EN7572 -> kmod-i2c-core: OK")
         PYTHON
 
         echo
         echo "========================================"
-        echo "打印 EN7572 package 定义"
+        echo "Makefile 静态检查"
         echo "========================================"
-        grep -R -n -A35 -B3 -E '^define[[:space:]]+KernelPackage/.*en7572' \
-          feeds/pon_drivers/airoha-pon-frontends \
-          --include='Makefile' || true
+
+        git diff --check -- feeds/pon_drivers/airoha-pon-frontends
 
         echo
-        echo "Makefile 静态检查："
-        git diff --check -- feeds/pon_drivers/airoha-pon-frontends
+        echo "========================================"
+        echo "打印最终 EN7572 package 定义"
+        echo "========================================"
+
+        sed -n '/^define KernelPackage\/airoha-en7572$/,/^endef$/p' \
+          feeds/pon_drivers/airoha-pon-frontends/Makefile
 
     # ============================================================
     # 11. 加载 XG-040G-MD 原始配置 + PON 配置
@@ -474,8 +459,11 @@ jobs:
 
     # ============================================================
     # 11.5. 在正式下载/编译前验证 PON package Makefile
+    #
+    # -n 只解析构建规则，不执行真正编译。
+    # 如果 Makefile 语法有问题，这里立即失败。
     # ============================================================
-    - name: Validate PON Makefiles(验证 PON Makefile)
+    - name: Validate PON Makefile(预检 PON Makefile)
       run: |
         cd "$OPENWRT_PATH"
 
@@ -483,8 +471,6 @@ jobs:
         echo "验证 airoha-pon-frontends Makefile"
         echo "========================================"
 
-        # -n 会完整解析 Makefile；这里不真正执行编译。
-        # 如果 patch 破坏了 Makefile 结构，会在这里立即失败。
         make -n package/feeds/pon_drivers/airoha-pon-frontends/compile >/dev/null
 
         echo "airoha-pon-frontends Makefile 解析通过。"
