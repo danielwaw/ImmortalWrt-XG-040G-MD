@@ -113,6 +113,8 @@ jobs:
 
         echo "OPENWRT_PATH=$PWD" >> "$GITHUB_ENV"
         echo "REPO_BRANCH=$REPO_BRANCH" >> "$GITHUB_ENV"
+        OPENWRT_COMMIT="$(git rev-parse HEAD)"
+        echo "OPENWRT_COMMIT=$OPENWRT_COMMIT" >> "$GITHUB_ENV"
 
         VERSION_INFO=$(git show -s --date=short \
           --format="作者: %an<br/>时间: %cd<br/>内容: %s<br/>hash: %H")
@@ -220,81 +222,103 @@ jobs:
     # ============================================================
     # 10.5. 修补 EN7572 的 I2C 包依赖
     #
-    # en7572.ko 实际引用 i2c-core.ko。
-    # OpenWrt 25.12 的包依赖检查要求消费者 package
-    # 显式声明 +kmod-i2c-core。
+    # 已确认：en7572.ko 在当前构建中引用 i2c-core.ko。
+    # 本步骤不依赖固定路径，而是在 PON feed 中扫描所有
+    # OpenWrt package Makefile，只修改包含 EN7572 KernelPackage
+    # 的 block，避免把 src/Makefile 误当成 package Makefile。
     # ============================================================
     - name: Patch EN7572 I2C Dependency(修补 EN7572 I2C 依赖)
       run: |
         cd "$OPENWRT_PATH"
 
         echo "========================================"
-        echo "定位 EN7572 package Makefile"
+        echo "定位并修补 EN7572 KernelPackage"
         echo "========================================"
 
-        EN7572_MK="$(grep -R -l -E 'en7572|kmod-airoha-en7572' \
-          feeds/pon_drivers/airoha-pon-frontends \
-          --include='Makefile' 2>/dev/null | head -n1)"
-
-        if [ -z "$EN7572_MK" ]; then
-          echo "ERROR: 找不到 EN7572 package Makefile"
-          exit 1
-        fi
-
-        echo "EN7572 Makefile: $EN7572_MK"
-
-        python3 - "$EN7572_MK" <<'PYTHON'
+        python3 <<'PYTHON'
         import re
         import sys
         from pathlib import Path
 
-        path = Path(sys.argv[1])
-        lines = path.read_text(errors="ignore").splitlines(True)
-        out = []
-        matched = False
-        patched = False
-        i = 0
+        root = Path("feeds/pon_drivers/airoha-pon-frontends")
+        if not root.is_dir():
+            raise SystemExit(f"ERROR: PON feed 不存在: {root}")
 
-        while i < len(lines):
-            line = lines[i]
-            m = re.match(r'^define\s+KernelPackage/(\S+)\s*$', line.rstrip('\n'))
+        makefiles = sorted(root.rglob("Makefile"))
+        if not makefiles:
+            raise SystemExit("ERROR: PON feed 中没有找到 Makefile")
 
-            if not m:
-                out.append(line)
-                i += 1
-                continue
+        package_re = re.compile(
+            r"^[ \t]*define[ \t]+(?:KernelPackage/[^ \t]+|Package/kmod-airoha-en7572)[ \t]*$",
+            re.I,
+        )
 
-            block = [line]
-            j = i + 1
-            while j < len(lines):
-                block.append(lines[j])
-                if lines[j].strip() == 'endef':
+        matches = []
+        patched = []
+
+        for path in makefiles:
+            lines = path.read_text(errors="ignore").splitlines(True)
+            i = 0
+
+            while i < len(lines):
+                header = lines[i].rstrip("\n")
+                if not package_re.match(header):
+                    i += 1
+                    continue
+
+                j = i + 1
+                while j < len(lines) and lines[j].strip() != "endef":
                     j += 1
-                    break
-                j += 1
 
-            block_text = ''.join(block).lower()
-            if 'en7572' not in block_text and 'kmod-airoha-en7572' not in block_text:
-                out.extend(block)
-                i = j
-                continue
+                if j >= len(lines):
+                    raise SystemExit(
+                        f"ERROR: {path} 中发现 package define，但没有找到对应 endef"
+                    )
 
-            matched = True
+                block = lines[i:j + 1]
+                block_text = "".join(block)
+                name = header.split("/", 1)[1].strip()
 
-            # Do not touch it if the dependency is already present.
-            if '+kmod-i2c-core' not in block_text:
-                # GNU make '+=' preserves any existing DEPENDS definition.
-                block.insert(len(block) - 1, '  DEPENDS+=+kmod-i2c-core\n')
-                patched = True
+                # 只处理真正与 EN7572 对应的 package block。
+                if (
+                    "en7572" not in name.lower()
+                    and "kmod-airoha-en7572" not in block_text.lower()
+                    and "en7572.ko" not in block_text.lower()
+                ):
+                    i = j + 1
+                    continue
 
-            out.extend(block)
-            i = j
+                matches.append((path, i + 1, name))
 
-        if not matched:
-            raise SystemExit('ERROR: 没有找到 EN7572 KernelPackage 定义')
+                if "+kmod-i2c-core" not in block_text:
+                    block.insert(-1, "  DEPENDS+=+kmod-i2c-core\n")
+                    lines[i:j + 1] = block
+                    patched.append((path, i + 1, name))
 
-        path.write_text(''.join(out))
-        print(f'EN7572 package matched; dependency patched={patched}')
+                i = j + 1
+
+            if any(m[0] == path for m in matches) and any(p[0] == path for p in patched):
+                path.write_text("".join(lines))
+
+        if not matches:
+            print("ERROR: 没有找到 EN7572 KernelPackage/Package 定义")
+            print("\n发现的相关 Makefile：")
+            for path in makefiles:
+                text = path.read_text(errors="ignore")
+                if re.search(r"en7572|kmod-airoha-en7572", text, re.I):
+                    print(path)
+            raise SystemExit(1)
+
+        print("找到 EN7572 package：")
+        for path, line, name in matches:
+            print(f"  {path}:{line} -> {name}")
+
+        print("本次实际修改：")
+        if patched:
+            for path, line, name in patched:
+                print(f"  {path}:{line} -> +kmod-i2c-core")
+        else:
+            print("  已经存在 +kmod-i2c-core，无需修改")
         PYTHON
 
         echo
@@ -302,13 +326,42 @@ jobs:
         echo "确认 EN7572 -> kmod-i2c-core"
         echo "========================================"
 
-        grep -R -n -A25 -B5 -E 'define KernelPackage/.*en7572' \
-          feeds/pon_drivers/airoha-pon-frontends \
-          --include='Makefile' 2>/dev/null || true
+        if ! python3 <<'PYTHON'
+        import re
+        from pathlib import Path
 
-        if ! grep -R -q -E '^[[:space:]]*DEPENDS[^=]*=[^[:space:]]*.*\+kmod-i2c-core|^[[:space:]]*DEPENDS\+=\+kmod-i2c-core' \
-            feeds/pon_drivers/airoha-pon-frontends --include='Makefile' 2>/dev/null; then
-          echo "ERROR: EN7572 package 没有找到 kmod-i2c-core 依赖"
+        root = Path("feeds/pon_drivers/airoha-pon-frontends")
+        package_re = re.compile(
+            r"^[ \t]*define[ \t]+(?:KernelPackage/[^ \t]+|Package/kmod-airoha-en7572)[ \t]*$",
+            re.I,
+        )
+
+        found = False
+        for path in sorted(root.rglob("Makefile")):
+            lines = path.read_text(errors="ignore").splitlines(True)
+            for i, line in enumerate(lines):
+                if not package_re.match(line.rstrip("\n")):
+                    continue
+                j = i + 1
+                while j < len(lines) and lines[j].strip() != "endef":
+                    j += 1
+                block = "".join(lines[i:j + 1])
+                name = line.split("/", 1)[1].strip()
+                if (
+                    "en7572" in name.lower()
+                    or "kmod-airoha-en7572" in block.lower()
+                    or "en7572.ko" in block.lower()
+                ):
+                    found = True
+                    print(f"{path}:{i + 1}: {name}")
+                    if "+kmod-i2c-core" not in block:
+                        raise SystemExit("ERROR: EN7572 package 仍缺少 +kmod-i2c-core")
+
+        if not found:
+            raise SystemExit("ERROR: 验证阶段没有找到 EN7572 package")
+        PYTHON
+        then
+          echo "ERROR: EN7572 -> kmod-i2c-core 验证失败"
           exit 1
         fi
 
@@ -372,8 +425,8 @@ jobs:
         grep -E '^CONFIG_PACKAGE_kmod-i2c(-an7581|-core)=' .config || true
 
         echo
-        echo "注意：CONFIG_I2C/CONFIG_I2C_MT7621 不在这里强制设置为 m，
-        它们由对应 KernelPackage 的 KCONFIG 管理。"
+        echo "注意：不在顶层 .config 中强制指定 CONFIG_I2C=m；
+        kmod-i2c-core / kmod-i2c-an7581 的 KCONFIG 由 OpenWrt KernelPackage 管理。"
 
         echo
         echo "========================================"
